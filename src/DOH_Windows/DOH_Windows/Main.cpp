@@ -1,7 +1,7 @@
 /*
 * DOH_Windows, DNS Over HTTPS for windows
 * Solodov A. N. (hotSAN)
-* 2016
+* 2021
 */
 
 # if  defined(_WINDOWS_) && !defined(_WINSOCK2API_)
