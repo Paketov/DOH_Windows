@@ -1,0 +1,7 @@
+CountWorkers:
+ 4
+LocalAddress:
+ 0.0.0.0 53
+DOHServers:
+ 1.1.1.1 443 https://cloudflare-dns.com/dns-query?dns=
+ 8.8.8.8 443 https://dns.google/dns-query?dns=
