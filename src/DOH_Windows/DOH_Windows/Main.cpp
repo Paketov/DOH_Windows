@@ -408,7 +408,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 					"Host: %s\r\n"
 					"Accept: application/dns-udpwireformat\r\n"
 					"Connection: keep-alive\r\n"
-					"\r\n\r\n",
+					"\r\n",
 					PathString,
 					Base64Buf,
 					HostString
@@ -590,7 +590,7 @@ static unsigned __stdcall MainDOH(void* data) {
 	StopServiceEvent = LqEventCreate(1);
 
 	int ConfigFileSize;
-	char* ConfigFile =
+	char ConfigFile2[] =
 		"CountWorkers:\n"
 		"2\n"
 		"LocalAddress:\n"
@@ -598,9 +598,9 @@ static unsigned __stdcall MainDOH(void* data) {
 		"DOHServers:\n"
 		" 1.1.1.1 443 https://cloudflare-dns.com/dns-query?dns=\n"
 		" 8.8.8.8 443 https://dns.google/dns-query?dns=\n",
-		*ConfigFile2 = ConfigFile;
+		*ConfigFile = ConfigFile2;
 
-	ConfigFileSize = sizeof(ConfigFile);
+	ConfigFileSize = sizeof(ConfigFile2);
 
 
 	FILE* OpenedConfigFile = fopen("C:\\Windows\\System32\\drivers\\etc\\doh.txt", "rb");
@@ -801,6 +801,7 @@ extern "C" __declspec(dllexport) VOID WINAPI InstallService() {
 		OutputDebugString(TEXT("DOH_Windows: RegSetValueExW() Reg value NetworkService has been setted"));
 	}
 }
+
 
 
 
