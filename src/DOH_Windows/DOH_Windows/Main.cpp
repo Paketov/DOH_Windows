@@ -103,7 +103,7 @@ static int ConnBindUDP(
 	const char* Host,
 	const char* Port,
 	int MaxConnections
-) {
+	) {
 	static const int True = 1;
 	int s;
 	addrinfo *Addrs = nullptr, HostInfo = { 0 };
@@ -144,7 +144,7 @@ static int ConnBindUDP(
 int ConnConnectTCP(
 	const wchar_t* Address,
 	const wchar_t* Port
-) {
+	) {
 	int s = -1;
 	ADDRINFOW hi = { 0 }, *ah = nullptr, *i;
 
@@ -217,11 +217,21 @@ void ParseConfigFile(int ConfigFileSize, char* ConfigFile) {
 			continue;
 		}
 		if (strnicmp(c, "countworkers", sizeof("countworkers") - 1) == 0) {
+			CurLocalAddress = false;
+			CurDOHServers = false;
 			c += (sizeof("countworkers") - 1);
 			for (; (c < m) && ((*c == ' ') || (*c == '\t') || (*c == ':') || (*c == '\n') || (*c == '\r')); c++);
 			CountWorkers = atoi(c);
 			for (; (c < m) && (*c != ' ') && (*c != '\t') && (*c != '\n') && (*c != '\r'); c++);
-			for (; (c < m) && ((*c == ' ') || (*c == '\t')); c++);
+		}
+
+		if (strnicmp(c, "disconnectwaittime", sizeof("disconnectwaittime") - 1) == 0) {
+			CurLocalAddress = false;
+			CurDOHServers = false;
+			c += (sizeof("disconnectwaittime") - 1);
+			for (; (c < m) && ((*c == ' ') || (*c == '\t') || (*c == ':') || (*c == '\n') || (*c == '\r')); c++);
+			DisconnectWaitTime = atoi(c);
+			for (; (c < m) && (*c != ' ') && (*c != '\t') && (*c != '\n') && (*c != '\r'); c++);
 		}
 
 		if (CurLocalAddress) {
@@ -404,7 +414,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 				int WrittenInBuf = snprintf(
 					SendBufferFilledPosEnd,
 					sizeof(SendBuffer) - (SendBufferFilledPosEnd - SendBuffer),
-					"GET %s%s HTTP/1.1\r\n"
+					"GET %s?dns=%s HTTP/1.1\r\n"
 					"Host: %s\r\n"
 					"Accept: application/dns-udpwireformat\r\n"
 					"Connection: keep-alive\r\n"
@@ -447,7 +457,8 @@ static unsigned __stdcall WorkerProc(void* data) {
 			if (FilledSize <= 0) {
 				Fds[1].events &= ~LQ_POLLOUT;
 				WaitTime = DisconnectWaitTime;
-			} else {
+			}
+			else {
 				WaitTime = 500;
 			}
 		}
@@ -596,8 +607,8 @@ static unsigned __stdcall MainDOH(void* data) {
 		"LocalAddress:\n"
 		" 0.0.0.0 53\n"
 		"DOHServers:\n"
-		" 1.1.1.1 443 https://cloudflare-dns.com/dns-query?dns=\n"
-		" 8.8.8.8 443 https://dns.google/dns-query?dns=\n",
+		" 1.1.1.1 443 https://cloudflare-dns.com/dns-query\n"
+		" 8.8.8.8 443 https://dns.google/dns-query\n",
 		*ConfigFile = ConfigFile2;
 
 	ConfigFileSize = sizeof(ConfigFile2);
@@ -652,7 +663,7 @@ static unsigned __stdcall MainDOH(void* data) {
 
 		if (res <= 0) {
 			//if (UDPSocket != -1)
-				//closesocket(UDPSocket);
+			//closesocket(UDPSocket);
 			//UDPSocket = ConnBindUDP(LocalAddress, LocalPort, 1024);
 			//Sleep(500);
 			goto lblContinue5;
@@ -764,17 +775,17 @@ extern "C" __declspec(dllexport) VOID WINAPI ServiceMain(DWORD argc, LPTSTR argv
 
 extern "C" __declspec(dllexport) VOID WINAPI InstallService() {
 	OutputDebugString(TEXT("DOH_Windows: Start InstallService()"));
-	
+
 	HKEY hKey;
 	DWORD dwType, cbData;
 	char Buf[1024];
 	wchar_t* wBuf = (wchar_t*)Buf;
-	LSTATUS Ret = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost", 0, KEY_READ|KEY_SET_VALUE| KEY_WRITE, &hKey);
+	LSTATUS Ret = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost", 0, KEY_READ | KEY_SET_VALUE | KEY_WRITE, &hKey);
 	if (Ret != ERROR_SUCCESS) {
 		OutputDebugString(TEXT("DOH_Windows: RegOpenKeyExW() Cannot open Svchost reg key"));
 		return;
 	}
-	
+
 	cbData = sizeof(Buf);
 	Ret = RegQueryValueExW(hKey, L"NetworkService", NULL, &dwType, (LPBYTE)Buf, &cbData);
 	if (Ret != ERROR_SUCCESS) {
@@ -797,7 +808,8 @@ extern "C" __declspec(dllexport) VOID WINAPI InstallService() {
 	Ret = RegSetValueExW(hKey, L"NetworkService", NULL, dwType, (BYTE*)Buf, cbData);
 	if (Ret != ERROR_SUCCESS) {
 		OutputDebugString(TEXT("DOH_Windows: RegSetValueExW() Reg value NetworkService not setted"));
-	} else {
+	}
+	else {
 		OutputDebugString(TEXT("DOH_Windows: RegSetValueExW() Reg value NetworkService has been setted"));
 	}
 }
