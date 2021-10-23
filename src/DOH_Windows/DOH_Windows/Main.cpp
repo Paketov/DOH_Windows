@@ -316,7 +316,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 	Worker* Wrk = (Worker*)data;
 
 	int Socket = -1;
-	SSL_CTX* ctx = NULL;
+	SSL_CTX* ctx = SSL_CTX_new(SSLv23_client_method());
 	SSL* ssl = NULL;
 
 	LqTimeMillisec WaitTime = INFINITE;
@@ -376,7 +376,6 @@ static unsigned __stdcall WorkerProc(void* data) {
 				if (Socket == -1) {
 					goto lblPollHup;
 				}
-				ctx = SSL_CTX_new(SSLv23_client_method());
 				ssl = SSL_new(ctx);
 
 				if (SSL_set_fd(ssl, Socket) == 0) {
@@ -552,8 +551,6 @@ static unsigned __stdcall WorkerProc(void* data) {
 				SSL_shutdown(ssl);
 				SSL_free(ssl);
 				ssl = NULL;
-				SSL_CTX_free(ctx);
-				ctx = NULL;
 			}
 			if (Socket != -1) {
 				closesocket(Socket);
@@ -583,6 +580,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 				break;
 		}
 	}
+	SSL_CTX_free(ctx);
 	free(QueryString);
 	free(HostString);
 	free(PathString);
