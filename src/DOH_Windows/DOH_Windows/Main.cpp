@@ -4,6 +4,10 @@
 * 2021
 */
 
+#include "LqFile.h"
+
+#ifdef LQPLATFORM_WINDOWS
+
 # if  defined(_WINDOWS_) && !defined(_WINSOCK2API_)
 #  error "Must stay before windows.h!"
 # endif
@@ -13,15 +17,24 @@
 # include <ws2ipdef.h>
 # include <wchar.h>
 
-#pragma comment(lib, "Ws2_32.lib")
-#pragma comment(lib, "Mswsock.lib")
-#pragma comment(lib, "legacy_stdio_definitions.lib")
+# pragma comment(lib, "Ws2_32.lib")
+# pragma comment(lib, "Mswsock.lib")
+# pragma comment(lib, "legacy_stdio_definitions.lib")
 //#pragma comment(lib, "msvcrt.lib")
 
-#include <Windows.h>
-#include <stdio.h>
-#include <stdint.h>
-#include <process.h>
+# include <Windows.h>
+# include <stdio.h>
+# include <stdint.h>
+# include <process.h>
+
+#else
+# include <sys/socket.h> 
+# include <sys/sendfile.h>
+# include <fcntl.h>
+
+
+#endif
+
 #include "LqFile.h"
 #include "LqParse.h"
 
@@ -33,7 +46,6 @@
 
 
 #include "LqAlloc.hpp"
-
 
 
 
@@ -57,9 +69,9 @@ static struct _wsa_data {
 
 
 typedef struct HttpsServerInfo {
-	wchar_t* Query;
-	wchar_t* Ip;
-	wchar_t* Port;
+	char* Query;
+	char* Ip;
+	char* Port;
 
 }HttpsServerInfo;
 
@@ -112,11 +124,11 @@ static int ConnBindUDP(
 	HostInfo.ai_flags = AI_PASSIVE;//AI_ALL;
 	HostInfo.ai_protocol = IPPROTO_UDP; // IPPROTO_TCP;
 	int res;
-	if ((res = getaddrinfo(((Host != nullptr) && (*Host != '\0')) ? Host : (const char*)nullptr, Port, &HostInfo, &Addrs)) != 0) {
+	if ((res = getaddrinfo(((Host != NULL) && (*Host != '\0')) ? Host : (const char*)NULL, Port, &HostInfo, &Addrs)) != 0) {
 		return -1;
 	}
 
-	for (auto i = Addrs; i != nullptr; i = i->ai_next) {
+	for (auto i = Addrs; i != NULL; i = i->ai_next) {
 		if ((s = socket(i->ai_family, i->ai_socktype, i->ai_protocol)) == -1)
 			continue;
 		LqDescrSetInherit(s, 0);
@@ -142,11 +154,11 @@ static int ConnBindUDP(
 }
 
 int ConnConnectTCP(
-	const wchar_t* Address,
-	const wchar_t* Port
+	const char* Address,
+	const char* Port
 	) {
 	int s = -1;
-	ADDRINFOW hi = { 0 }, *ah = nullptr, *i;
+	addrinfo hi = { 0 }, *ah = nullptr, *i;
 
 	hi.ai_family = AF_UNSPEC;
 	hi.ai_socktype = SOCK_STREAM; // SOCK_STREAM;
@@ -154,24 +166,24 @@ int ConnConnectTCP(
 	hi.ai_flags = 0;//AI_ALL;
 
 	int res;
-	if ((res = GetAddrInfoW(((Address != nullptr) && (*Address != '\0')) ? Address : (const wchar_t*)nullptr, Port, &hi, &ah)) != 0) {
+	if ((res = getaddrinfo(((Address != NULL) && (*Address != '\0')) ? Address : (const char*)NULL, Port, &hi, &ah)) != 0) {
 		return -1;
 	}
 
-	for (i = ah; i != nullptr; i = i->ai_next) {
+	for (i = ah; i != NULL; i = i->ai_next) {
 		if ((s = socket(i->ai_family, i->ai_socktype, i->ai_protocol)) == -1)
 			continue;
 		if (connect(s, i->ai_addr, i->ai_addrlen) != -1)
 			break;
 		closesocket(s);
 	}
-	if (i == nullptr) {
-		if (ah != nullptr)
-			FreeAddrInfoW(ah);
+	if (i == NULL) {
+		if (ah != NULL)
+			freeaddrinfo(ah);
 		return -1;
 	}
-	if (ah != nullptr)
-		FreeAddrInfoW(ah);
+	if (ah != NULL)
+		freeaddrinfo(ah);
 	return s;
 }
 
@@ -275,39 +287,18 @@ void ParseConfigFile(int ConfigFileSize, char* ConfigFile) {
 			CountServers++;
 			ServersInfo = (HttpsServerInfo*)realloc(ServersInfo, CountServers* sizeof(HttpsServerInfo));
 
-			ServersInfo[CountServers - 1].Ip = (wchar_t*)malloc(((EndIpAddress - StartIpAddress) + 10) * sizeof(wchar_t));
-			int Written = MultiByteToWideChar(
-				CP_UTF8,
-				0,
-				StartIpAddress,
-				EndIpAddress - StartIpAddress,
-				ServersInfo[CountServers - 1].Ip,
-				(EndIpAddress - StartIpAddress) + 10
-				);
-			ServersInfo[CountServers - 1].Ip[Written] = L'\0';
+			ServersInfo[CountServers - 1].Ip = (char*)malloc((EndIpAddress - StartIpAddress) + 2);
+			strncpy(ServersInfo[CountServers - 1].Ip, StartIpAddress, EndIpAddress - StartIpAddress);
+			ServersInfo[CountServers - 1].Ip[EndIpAddress - StartIpAddress] = '\0';
 
-			ServersInfo[CountServers - 1].Port = (wchar_t*)malloc(((EndPort - StartPort) + 10) * sizeof(wchar_t));
-			Written = MultiByteToWideChar(
-				CP_UTF8,
-				0,
-				StartPort,
-				EndPort - StartPort,
-				ServersInfo[CountServers - 1].Port,
-				(EndPort - StartPort) + 10
-				);
-			ServersInfo[CountServers - 1].Port[Written] = L'\0';
+			ServersInfo[CountServers - 1].Port = (char*)malloc((EndPort - StartPort) + 2);
+			strncpy(ServersInfo[CountServers - 1].Port, StartPort, EndPort - StartPort);
+			ServersInfo[CountServers - 1].Port[EndPort - StartPort] = '\0';
 
 
-			ServersInfo[CountServers - 1].Query = (wchar_t*)malloc(((EndQuery - StartQuery) + 10) * sizeof(wchar_t));
-			Written = MultiByteToWideChar(
-				CP_UTF8,
-				0,
-				StartQuery,
-				EndQuery - StartQuery,
-				ServersInfo[CountServers - 1].Query,
-				(EndQuery - StartQuery) + 10
-				);
-			ServersInfo[CountServers - 1].Query[Written] = L'\0';
+			ServersInfo[CountServers - 1].Query = (char*)malloc((EndQuery - StartQuery) + 2);
+			strncpy(ServersInfo[CountServers - 1].Query, StartQuery, EndQuery - StartQuery);
+			ServersInfo[CountServers - 1].Query[EndQuery - StartQuery] = '\0';
 		}
 	}
 }
@@ -325,11 +316,12 @@ static unsigned __stdcall WorkerProc(void* data) {
 	DnsReq* CurTsk;
 	Fds[0].fd = Wrk->Event;
 	Fds[0].events = LQ_POLLIN;
-	int QueryStringLen = wcslen(Wrk->ServerInfo->Query) * 3;
-	char* QueryString = (char*)malloc(QueryStringLen);
-	char* HostString = (char*)malloc(QueryStringLen);
-	char* PathString = (char*)malloc(QueryStringLen);
-	WideCharToMultiByte(CP_UTF8, 0, Wrk->ServerInfo->Query, -1, QueryString, QueryStringLen, NULL, NULL);
+	int QueryStringLen = strlen(Wrk->ServerInfo->Query);
+	char* QueryString = (char*)malloc(QueryStringLen + 3);
+	char* HostString = (char*)malloc(QueryStringLen + 3);
+	char* PathString = (char*)malloc(QueryStringLen + 3);
+	strncpy(QueryString, Wrk->ServerInfo->Query, QueryStringLen);
+	QueryString[QueryStringLen] = '\0';
 
 	char* SchemeStart; char* SchemeEnd;
 	char* UserInfoStart; char* UserInfoEnd;

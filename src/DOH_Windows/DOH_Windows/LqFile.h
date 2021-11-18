@@ -10,6 +10,45 @@
 
 #include <stdint.h>
 
+
+#if defined(_WIN64) || defined(_WIN32)
+# define LQPLATFORM_WINDOWS
+
+#else
+# define LQPLATFORM_POSIX
+
+
+# ifdef __ANDROID__
+#  define LQPLATFORM_ANDROID
+#  define LQ_ASYNC_IO_NOT_HAVE
+# endif
+
+#endif
+
+/* Architectuire word bits */
+#if defined(_WIN64)
+# define LQARCH_64
+#elif defined(_WIN32)
+# define LQARCH_32
+#elif __WORDSIZE == 64
+# define LQARCH_64
+#elif __WORDSIZE == 32
+# define LQARCH_64
+#elif defined(__GNUC__)
+# ifdef __x86_64__
+#  define LQARCH_64
+# else
+#  define LQARCH_32
+# endif
+#else
+# error "Not detect platform architecture"
+#endif
+
+
+
+
+
+
 typedef uint16_t                LqEvntFlag;
 
 #define LQ_POLL_TYPE_EVENT 0

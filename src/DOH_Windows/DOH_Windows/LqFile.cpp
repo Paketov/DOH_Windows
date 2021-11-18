@@ -7,6 +7,10 @@
 */
 
 
+#include "LqFile.h"
+
+#ifdef LQPLATFORM_WINDOWS
+
 # if  defined(_WINDOWS_) && !defined(_WINSOCK2API_)
 #  error "Must stay before windows.h!"
 # endif
@@ -24,6 +28,10 @@
 #include "LqFile.h"
 
 #include "LqAlloc.hpp"
+
+
+
+
 
 
 #pragma comment(lib, "ntdll.lib")
@@ -92,19 +100,6 @@ extern "C" __kernel_entry NTSTATUS NTAPI NtReadFile(
 
 int LqDescrSetInherit(int Descriptor, int IsInherit) {
 	return (SetHandleInformation((HANDLE)Descriptor, HANDLE_FLAG_INHERIT, IsInherit) == TRUE) ? 0 : -1;
-}
-
-int LqConnSwitchNonBlock(int Fd, int IsNonBlock) {
-	u_long nonBlocking = IsNonBlock;
-	if (ioctlsocket(Fd, FIONBIO, &nonBlocking) == -1)
-		return -1;
-	return 0;
-}
-
-bool LqDescrIsSocket(int Fd) {
-	int val;
-	socklen_t len = sizeof(val);
-	return getsockopt(Fd, SOL_SOCKET, SO_ACCEPTCONN, (char*)&val, &len) != -1;
 }
 
 bool LqDescrIsTerminal(int Fd) {
@@ -469,6 +464,81 @@ lblOut:
 	return CountEvents;
 }
 
+
+
+
+#else
+
+
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/types.h>
+#include <sys/time.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <signal.h>
+#include <dirent.h>
+#include <sys/ioctl.h>
+#include <sys/socket.h> 
+
+#include <sys/wait.h>
+
+#include <sys/eventfd.h>
+#include <sys/inotify.h>
+
+#include "LqAlloc.hpp"
+
+int LqDescrSetInherit(int Descriptor, int IsInherit) {
+	auto Val = fcntl(Descriptor, F_GETFD);
+	if (Val < 0)
+		return -1;
+	return fcntl(Descriptor, F_SETFD, (IsInherit) ? (Val & ~(FD_CLOEXEC)) : (Val | FD_CLOEXEC));
+}
+
+
+bool LqDescrIsTerminal(int Fd) {
+	return isatty(Fd) == 1;
+}
+
+int LqEventCreate(int InheritFlag) {
+	int Res = syscall(SYS_eventfd, (unsigned int)0, (int)0);
+	if (Res == -1)
+		return -1;
+	fcntl(Res, F_SETFL, fcntl(Res, F_GETFL, 0) | O_NONBLOCK);
+	if (InheritFlag & LQ_O_NOINHERIT)
+		fcntl(Res, F_SETFD, fcntl(Res, F_GETFD) | FD_CLOEXEC);
+	return Res;
+}
+
+
+
+int LqEventSet(int FileEvent) {
+	eventfd_t r = 1;
+	return (write(FileEvent, &r, sizeof(r)) > 0) ? 0 : -1;
+}
+
+
+
+int LqEventReset(int FileEvent) {
+	eventfd_t r[20];
+	return (read(FileEvent, &r, sizeof(r)) > 0) ? 1 : 0;
+}
+
+
+
+void LqThreadYield() {
+	usleep(0);
+}
+
+
+int LqPollCheck(LqPoll* Fds, size_t CountFds, LqTimeMillisec TimeoutMillisec) {
+	return poll(Fds, CountFds, TimeoutMillisec);
+}
+
+#endif
+
+
 short LqPollCheckSingle(int Fd, short Events, LqTimeMillisec TimeoutMillisec) {
 	LqPoll Poll;
 	Poll.fd = Fd;
@@ -478,6 +548,26 @@ short LqPollCheckSingle(int Fd, short Events, LqTimeMillisec TimeoutMillisec) {
 		return Poll.revents;
 	return 0;
 }
+
+int LqConnSwitchNonBlock(int Fd, int IsNonBlock) {
+#ifdef LQPLATFORM_WINDOWS
+	u_long nonBlocking = IsNonBlock;
+	if (ioctlsocket(Fd, FIONBIO, &nonBlocking) == -1)
+		return -1;
+#else
+	auto Flags = fcntl(Fd, F_GETFL, 0);
+	if (fcntl(Fd, F_SETFL, (IsNonBlock) ? (Flags | O_NONBLOCK) : (Flags & ~O_NONBLOCK)) == -1)
+		return -1;
+#endif
+	return 0;
+}
+
+bool LqDescrIsSocket(int Fd) {
+	int val;
+	socklen_t len = sizeof(val);
+	return getsockopt(Fd, SOL_SOCKET, SO_ACCEPTCONN, (char*)&val, &len) != -1;
+}
+
 
 #define __METHOD_DECLS__
 #include "LqAlloc.hpp"
