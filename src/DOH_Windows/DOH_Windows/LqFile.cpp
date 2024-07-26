@@ -194,8 +194,7 @@ int LqPollCheck(LqPoll* Fds, size_t CountFds, LqTimeMillisec TimeoutMillisec) {
 				CloseHandle(Handles[i]);
 				Handles[i] = (HANDLE)Fds[i].fd;
 			}
-		}
-		else if (LqDescrIsTerminal(Fds[i].fd)) {
+		} else if (LqDescrIsTerminal(Fds[i].fd)) {
 			Types[i] = LQ_POLL_TYPE_TERMINAL;
 			HavePipeOrTerminal = true;
 			if (Fds[i].events & LQ_POLLIN) {
@@ -222,8 +221,7 @@ int LqPollCheck(LqPoll* Fds, size_t CountFds, LqTimeMillisec TimeoutMillisec) {
 				Handles[i] = (HANDLE)Fds[i].fd;
 			else
 				Handles[i] = CreateEventW(NULL, TRUE, FALSE, NULL);
-		}
-		else if (NtCancelIoFile((HANDLE)Fds[i].fd, &StatusBlock) == STATUS_OBJECT_TYPE_MISMATCH) { /* Is Event */
+		} else if (NtCancelIoFile((HANDLE)Fds[i].fd, &StatusBlock) == STATUS_OBJECT_TYPE_MISMATCH) { /* Is Event */
 			Types[i] = LQ_POLL_TYPE_EVENT;
 			if (Fds[i].events & (LQ_POLLIN | LQ_POLLOUT)) {
 				Handles[i] = (HANDLE)Fds[i].fd;
@@ -244,11 +242,10 @@ int LqPollCheck(LqPoll* Fds, size_t CountFds, LqTimeMillisec TimeoutMillisec) {
 				Handles[i] = (HANDLE)Fds[i].fd;
 			else
 				Handles[i] = CreateEventW(NULL, TRUE, FALSE, NULL);
-		}
-		else if (
+		} else if (
 			(Status = NtQueryInformationFile((HANDLE)Fds[i].fd, &StatusBlock, &PipeInfo, sizeof(PipeInfo), (FILE_INFORMATION_CLASS)24)) !=
 			STATUS_INVALID_PARAMETER
-			) { /* Is pipe */
+		) { /* Is pipe */
 			Types[i] = LQ_POLL_TYPE_PIPE;
 			HavePipeOrTerminal = true;
 
@@ -269,8 +266,7 @@ int LqPollCheck(LqPoll* Fds, size_t CountFds, LqTimeMillisec TimeoutMillisec) {
 				Handles[i] = (HANDLE)Fds[i].fd;
 			else
 				Handles[i] = CreateEventW(NULL, TRUE, FALSE, NULL);
-		}
-		else {
+		} else {
 			Types[i] = LQ_POLL_TYPE_DRIVER;
 			Fds[i].revents = 0;
 			if (Fds[i].events & LQ_POLLOUT) {
@@ -345,8 +341,7 @@ lblAgainCheck:
 			if (CurWaitTime <= ((LqTimeMillisec)0))
 				break;
 		}
-	}
-	else {
+	} else {
 		WaitForMultipleObjects(CountFds, Handles, FALSE, CurWaitTime);
 	}
 	WaitTime -= CurWaitTime2;
@@ -374,8 +369,7 @@ lblAgainCheck:
 			Status = NtQueryInformationFile((HANDLE)Fds[i].fd, &StatusBlock, &PipeInfo, sizeof(PipeInfo), (FILE_INFORMATION_CLASS)24);
 			if (Status != STATUS_SUCCESS) {
 				Fds[i].revents |= LQ_POLLERR;
-			}
-			else {
+			} else {
 				if ((Fds[i].events & LQ_POLLOUT) && (PipeInfo.WriteQuotaAvailable > 0))
 					Fds[i].revents |= LQ_POLLOUT;
 				if ((Fds[i].events & LQ_POLLIN) && (PipeInfo.ReadDataAvailable > 0))
@@ -396,8 +390,7 @@ lblAgainCheck:
 					if (ir.EventType == KEY_EVENT && ir.Event.KeyEvent.bKeyDown) {
 						Fds[i].revents = LQ_POLLIN;
 						break;
-					}
-					else {
+					} else {
 						ReadConsoleInputW((HANDLE)Fds[i].fd, &ir, 1, &num_read);
 					}
 				}

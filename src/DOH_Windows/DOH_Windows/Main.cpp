@@ -48,6 +48,7 @@
 #include "LqAlloc.hpp"
 
 
+#define REQ_PKT_SIZE 4096
 
 
 # ifndef WSA_VERSION
@@ -72,7 +73,6 @@ typedef struct HttpsServerInfo {
 	char* Query;
 	char* Ip;
 	char* Port;
-
 }HttpsServerInfo;
 
 typedef union ConnAddr {
@@ -87,7 +87,7 @@ typedef struct DnsReq {
 	DnsReq* PrevTsk;
 	ConnAddr From;
 	int FromLen;
-	uint8_t Buf[4096];
+	uint8_t Buf[REQ_PKT_SIZE];
 	int BufLen;
 }DnsReq;
 
@@ -98,18 +98,56 @@ typedef struct Worker {
 	DnsReq* CurTsk;
 	int TskLen;
 	int Event;
-	unsigned TreadId;
+	unsigned ThreadId;
 	HANDLE ThreadHandle;
 	HttpsServerInfo* ServerInfo;
 	bool IsEndWork;
 } Worker;
+
+typedef struct ResponceHost {
+	char* Name;
+	ConnAddr RspIP;
+	bool IsNotResponse;
+} ResponceHost;
+
+
+#pragma pack(push)
+#pragma pack(1)
+
+typedef struct DnsPkt{
+	uint16_t Id;
+	uint16_t Flags;
+	uint16_t QueryCount;
+	uint16_t AnsRRs;
+	uint16_t AutorRRs;
+	uint16_t AddisRRs;
+} DnsPkt;
+
+typedef struct DnsPktQuery {
+	uint16_t Type;
+	uint16_t Class;
+} DnsPktQuery;
+
+typedef struct DnsPktResp {
+	uint16_t Name;
+	uint16_t Type;
+	uint16_t Class;
+	uint32_t TTL;
+	uint16_t DataLen;
+	uint8_t  IpAddr[1]; //Various size
+} DnsPktResp;
+
+#pragma pack(pop)
+
+
 
 FILE _iob[] = { *stdin, *stdout, *stderr };
 
 extern "C" FILE * __cdecl __iob_func(void) {
 	return _iob;
 }
-
+/* match: search for regexp anywhere in text */
+static int match(char *regexp, char *text);
 
 static int ConnBindUDP(
 	const char* Host,
@@ -153,10 +191,10 @@ static int ConnBindUDP(
 	return s;
 }
 
-int ConnConnectTCP(
+static int ConnConnectTCP(
 	const char* Address,
 	const char* Port
-	) {
+) {
 	int s = -1;
 	addrinfo hi = { 0 }, *ah = nullptr, *i;
 
@@ -197,6 +235,9 @@ LqTimeMillisec DisconnectWaitTime = 12000; //12 seconds
 char* LocalAddress = "0.0.0.0", *LocalAddress2 = LocalAddress;
 char* LocalPort = "53", *LocalPort2 = LocalPort;
 int StopServiceEvent = NULL;
+int CountRspHosts = 0;
+ResponceHost* RspHosts = NULL;
+
 
 //Service
 SERVICE_STATUS serviceStatus;
@@ -204,103 +245,236 @@ SERVICE_STATUS_HANDLE serviceStatusHandle;
 #define SVCNAME L"DOH_Windows"
 
 
-void ParseConfigFile(int ConfigFileSize, char* ConfigFile) {
+static void ParseConfigFile(int ConfigFileSize, char* ConfigFile) {
 	//Parse config file
-	bool CurLocalAddress = false;
-	bool CurDOHServers = false;
-
+	typedef enum CUR_READ_STATE {
+		CUR_STATE_DEFAULT,
+		CUR_STATE_LOC_ADDR,
+		CUR_STATE_DOH_SERV,
+		CUR_STATE_HOSTS
+	} CUR_READ_STATE;
+	CUR_READ_STATE State = CUR_STATE_DEFAULT;
 
 	for (char* c = ConfigFile, *m = c + ConfigFileSize; (c < m) && (*c != '\0'); ) {
 		for (; (c < m) && ((*c == ' ') || (*c == '\t') || (*c == '\n') || (*c == '\r')); c++);
 		if ((c >= m) || (*c == '\0'))
 			break;
-		if (strnicmp(c, "localaddress", sizeof("localaddress") - 1) == 0) {
-			CurLocalAddress = true;
-			CurDOHServers = false;
-			c += (sizeof("localaddress") - 1);
+		if (strnicmp(c, "localaddress:", sizeof("localaddress:") - 1) == 0) {
+			State = CUR_STATE_LOC_ADDR;
+			c += (sizeof("localaddress:") - 1);
 			for (; (c < m) && ((*c == ' ') || (*c == '\t') || (*c == ':')); c++);
 			continue;
 		}
-		if (strnicmp(c, "dohservers", sizeof("dohservers") - 1) == 0) {
-			CurLocalAddress = false;
-			CurDOHServers = true;
-			c += (sizeof("dohservers") - 1);
+		if (strnicmp(c, "dohservers:", sizeof("dohservers:") - 1) == 0) {
+			State = CUR_STATE_DOH_SERV;
+			c += (sizeof("dohservers:") - 1);
 			for (; (c < m) && ((*c == ' ') || (*c == '\t') || (*c == ':')); c++);
 			continue;
 		}
-		if (strnicmp(c, "countworkers", sizeof("countworkers") - 1) == 0) {
-			CurLocalAddress = false;
-			CurDOHServers = false;
-			c += (sizeof("countworkers") - 1);
+		if (strnicmp(c, "countworkers:", sizeof("countworkers:") - 1) == 0) {
+			State = CUR_STATE_DEFAULT;
+			c += (sizeof("countworkers:") - 1);
 			for (; (c < m) && ((*c == ' ') || (*c == '\t') || (*c == ':') || (*c == '\n') || (*c == '\r')); c++);
 			CountWorkers = atoi(c);
 			for (; (c < m) && (*c != ' ') && (*c != '\t') && (*c != '\n') && (*c != '\r'); c++);
 		}
 
-		if (strnicmp(c, "disconnectwaittime", sizeof("disconnectwaittime") - 1) == 0) {
-			CurLocalAddress = false;
-			CurDOHServers = false;
-			c += (sizeof("disconnectwaittime") - 1);
+		if (strnicmp(c, "disconnectwaittime:", sizeof("disconnectwaittime:") - 1) == 0) {
+			State = CUR_STATE_DEFAULT;
+			c += (sizeof("disconnectwaittime:") - 1);
 			for (; (c < m) && ((*c == ' ') || (*c == '\t') || (*c == ':') || (*c == '\n') || (*c == '\r')); c++);
 			DisconnectWaitTime = atoi(c);
 			for (; (c < m) && (*c != ' ') && (*c != '\t') && (*c != '\n') && (*c != '\r'); c++);
 		}
 
-		if (CurLocalAddress) {
-			for (; (c < m) && ((*c == ' ') || (*c == '\t')); c++);
-			char* StartIpAddress = c;
-			for (; (c < m) && (*c != ' ') && (*c != '\t'); c++);
-			char* EndIpAddress = c;
-
-			for (; (c < m) && ((*c == ' ') || (*c == '\t')); c++);
-			char* StartPort = c;
-			for (; (c < m) && (*c != ' ') && (*c != '\t') && (*c != '\n') && (*c != '\r'); c++);
-			char* EndPort = c;
-
-			for (; (c < m) && ((*c == ' ') || (*c == '\t')); c++);
-
-			LocalAddress = (char*)malloc((EndIpAddress - StartIpAddress) + 10);
-			strncpy(LocalAddress, StartIpAddress, EndIpAddress - StartIpAddress);
-			LocalAddress[EndIpAddress - StartIpAddress] = '\0';
-
-			LocalPort = (char*)malloc((EndPort - StartPort) + 10);
-			strncpy(LocalPort, StartPort, EndPort - StartPort);
-			LocalPort[EndPort - StartPort] = '\0';
+		if (strnicmp(c, "hostsmatch:", sizeof("hostsmatch:") - 1) == 0) {
+			State = CUR_STATE_HOSTS;
+			c += (sizeof("hostsmatch:") - 1);
+			for (; (c < m) && ((*c == ' ') || (*c == '\t') || (*c == ':')); c++);
+			continue;
 		}
 
-		if (CurDOHServers) {
-			for (; (c < m) && ((*c == ' ') || (*c == '\t')); c++);
-			char* StartIpAddress = c;
-			for (; (c < m) && (*c != ' ') && (*c != '\t'); c++);
-			char* EndIpAddress = c;
+		switch (State) {
+			case CUR_STATE_LOC_ADDR: {
+				for (; (c < m) && ((*c == ' ') || (*c == '\t')); c++);
+				char* StartIpAddress = c;
+				for (; (c < m) && (*c != ' ') && (*c != '\t'); c++);
+				char* EndIpAddress = c;
 
-			for (; (c < m) && ((*c == ' ') || (*c == '\t')); c++);
-			char* StartPort = c;
-			for (; (c < m) && (*c != ' ') && (*c != '\t'); c++);
-			char* EndPort = c;
+				for (; (c < m) && ((*c == ' ') || (*c == '\t')); c++);
+				char* StartPort = c;
+				for (; (c < m) && (*c != ' ') && (*c != '\t') && (*c != '\n') && (*c != '\r'); c++);
+				char* EndPort = c;
 
-			for (; (c < m) && ((*c == ' ') || (*c == '\t')); c++);
-			char* StartQuery = c;
-			for (; (c < m) && (*c != '\r') && (*c != '\n'); c++);
-			char* EndQuery = c;
+				for (; (c < m) && ((*c == ' ') || (*c == '\t')); c++);
 
-			CountServers++;
-			ServersInfo = (HttpsServerInfo*)realloc(ServersInfo, CountServers* sizeof(HttpsServerInfo));
+				LocalAddress = (char*)malloc((EndIpAddress - StartIpAddress) + 10);
+				strncpy(LocalAddress, StartIpAddress, EndIpAddress - StartIpAddress);
+				LocalAddress[EndIpAddress - StartIpAddress] = '\0';
 
-			ServersInfo[CountServers - 1].Ip = (char*)malloc((EndIpAddress - StartIpAddress) + 2);
-			strncpy(ServersInfo[CountServers - 1].Ip, StartIpAddress, EndIpAddress - StartIpAddress);
-			ServersInfo[CountServers - 1].Ip[EndIpAddress - StartIpAddress] = '\0';
+				LocalPort = (char*)malloc((EndPort - StartPort) + 10);
+				strncpy(LocalPort, StartPort, EndPort - StartPort);
+				LocalPort[EndPort - StartPort] = '\0';
+			}break;
+			case CUR_STATE_DOH_SERV: {
+				for (; (c < m) && ((*c == ' ') || (*c == '\t')); c++);
+				char* StartIpAddress = c;
+				for (; (c < m) && (*c != ' ') && (*c != '\t'); c++);
+				char* EndIpAddress = c;
 
-			ServersInfo[CountServers - 1].Port = (char*)malloc((EndPort - StartPort) + 2);
-			strncpy(ServersInfo[CountServers - 1].Port, StartPort, EndPort - StartPort);
-			ServersInfo[CountServers - 1].Port[EndPort - StartPort] = '\0';
+				for (; (c < m) && ((*c == ' ') || (*c == '\t')); c++);
+				char* StartPort = c;
+				for (; (c < m) && (*c != ' ') && (*c != '\t'); c++);
+				char* EndPort = c;
+
+				for (; (c < m) && ((*c == ' ') || (*c == '\t')); c++);
+				char* StartQuery = c;
+				for (; (c < m) && (*c != '\r') && (*c != '\n'); c++);
+				char* EndQuery = c;
+
+				CountServers++;
+				ServersInfo = (HttpsServerInfo*)realloc(ServersInfo, CountServers* sizeof(HttpsServerInfo));
+
+				ServersInfo[CountServers - 1].Ip = (char*)malloc((EndIpAddress - StartIpAddress) + 2);
+				strncpy(ServersInfo[CountServers - 1].Ip, StartIpAddress, EndIpAddress - StartIpAddress);
+				ServersInfo[CountServers - 1].Ip[EndIpAddress - StartIpAddress] = '\0';
+
+				ServersInfo[CountServers - 1].Port = (char*)malloc((EndPort - StartPort) + 2);
+				strncpy(ServersInfo[CountServers - 1].Port, StartPort, EndPort - StartPort);
+				ServersInfo[CountServers - 1].Port[EndPort - StartPort] = '\0';
 
 
-			ServersInfo[CountServers - 1].Query = (char*)malloc((EndQuery - StartQuery) + 2);
-			strncpy(ServersInfo[CountServers - 1].Query, StartQuery, EndQuery - StartQuery);
-			ServersInfo[CountServers - 1].Query[EndQuery - StartQuery] = '\0';
+				ServersInfo[CountServers - 1].Query = (char*)malloc((EndQuery - StartQuery) + 2);
+				strncpy(ServersInfo[CountServers - 1].Query, StartQuery, EndQuery - StartQuery);
+				ServersInfo[CountServers - 1].Query[EndQuery - StartQuery] = '\0';
+			}break;
+			case CUR_STATE_HOSTS: {
+				for (; (c < m) && ((*c == ' ') || (*c == '\t')); c++);
+				char* StartHost = c;
+				for (; (c < m) && (*c != ' ') && (*c != '\t') && (*c != '\r') && (*c != '\n') && (*c != '\0'); c++);
+				char* EndHost = c;
+
+				for (; (c < m) && ((*c == ' ') || (*c == '\t')); c++);
+				char* StartIp = c;
+				for (; (c < m) && (*c != ' ') && (*c != '\t') && (*c != '\0') && (*c != '\r') && (*c != '\n'); c++);
+				char* EndIp = c;
+
+				RspHosts = (ResponceHost*)realloc(RspHosts, (CountRspHosts + 1) * sizeof(RspHosts[0]));
+				RspHosts[CountRspHosts].Name = (char*)malloc((EndHost - StartHost) + 2);
+				strncpy(RspHosts[CountRspHosts].Name, StartHost, EndHost - StartHost);
+				RspHosts[CountRspHosts].Name[EndHost - StartHost] = '\0';
+				char OrigEndIp = *EndIp;
+				*EndIp = '\0';
+				RspHosts[CountRspHosts].IsNotResponse = false;
+
+				if (StartIp == EndIp)
+					goto lblIpIsEmpty;
+
+				if (inet_pton(AF_INET, StartIp, &RspHosts[CountRspHosts].RspIP.AddrInet.sin_addr) > 0) {
+					RspHosts[CountRspHosts].RspIP.Addr.sa_family = AF_INET;
+				} else if(inet_pton(AF_INET6, StartIp, &RspHosts[CountRspHosts].RspIP.AddrInet6.sin6_addr) > 0) {
+					RspHosts[CountRspHosts].RspIP.Addr.sa_family = AF_INET6;
+				} else {
+lblIpIsEmpty:
+					RspHosts[CountRspHosts].IsNotResponse = true;
+					memset(&RspHosts[CountRspHosts].RspIP, 0, sizeof(RspHosts[CountRspHosts].RspIP));
+					RspHosts[CountRspHosts].RspIP.Addr.sa_family = AF_INET;
+				}
+				*EndIp = OrigEndIp;
+				CountRspHosts++;
+			}break;
 		}
 	}
+}
+
+
+/* string match pattern */
+static int matchhere(char *regexp, char *text);
+static int matchstar(int c, char *regexp, char *text);
+
+//c    matches any literal character c
+//?    matches any single character
+//^    matches the beginning of the input string
+//$    matches the end of the input string
+//*    matches zero or more occurrences of the previous character
+
+/* match: search for regexp anywhere in text */
+static int match(char *regexp, char *text){
+	if (regexp[0] == '^')
+		return matchhere(regexp + 1, text);
+	do {    /* must look even if string is empty */
+		if (matchhere(regexp, text))
+			return 1;
+	} while (*text++ != '\0');
+	return 0;
+}
+
+/* matchhere: search for regexp at beginning of text */
+static int matchhere(char *regexp, char *text){
+	if (regexp[0] == '\0')
+		return 1;
+	if (regexp[1] == '*')
+		return matchstar(regexp[0], regexp + 2, text);
+	if (regexp[0] == '$' && regexp[1] == '\0')
+		return *text == '\0';
+	if (*text != '\0' && (regexp[0] == '?' || regexp[0] == *text))
+		return matchhere(regexp + 1, text + 1);
+	return 0;
+}
+
+/* matchstar: search for c*regexp at beginning of text */
+static int matchstar(int c, char *regexp, char *text) {
+	do {    /* a * matches zero or more instances */
+		if (matchhere(regexp, text))
+			return 1;
+	} while (*text != '\0' && (*text++ == c || c == '?'));
+	return 0;
+}
+
+
+
+
+static int GetDomainsNamesFromDNSPkt(const void* Dns, size_t DnsLen, char* DstBuf, size_t DstBufLen) {
+	if (DnsLen <= (sizeof(DnsPkt) + sizeof(DnsPktQuery) + 1))
+		return 0;
+	const DnsPkt* DnsVal = (const DnsPkt*)Dns;
+	const char* Querys = (const char*)(DnsVal + 1);
+	int QueryCount = htons(DnsVal->QueryCount);
+	if (QueryCount > 100)
+		return 0;
+	char* DstPos = DstBuf;
+	const char* c = Querys;
+	int i = 0;
+	for (; (i < QueryCount) && (c < ((const char*)Dns + DnsLen)); i++) {
+		for (; c < ((const char*)Dns + DnsLen);) {
+			uint8_t CountCharsInSubDomen = *((uint8_t*)c);
+			if (CountCharsInSubDomen == 0)
+				break;
+			c++;
+			for (
+				const char *m = (const char*)Dns + DnsLen, *m2 = DstBuf + DstBufLen, *m3 = c + CountCharsInSubDomen;
+				(c < m3) && (c < m) && (DstPos < m2);
+				c++, DstPos++
+			) {
+				*DstPos = *c;
+			}
+			if ((DstPos + 2) >= (DstBuf + DstBufLen))
+				return 0;
+			if (c >= ((const char*)Dns + DnsLen))
+				return 0;
+			if (*((uint8_t*)c) > 0) {
+				*DstPos = '.';
+				DstPos++;
+			}
+		}
+
+		if ((DstPos + 2) >= (DstBuf + DstBufLen))
+			return 0;
+		*DstPos = '\0';
+		DstPos++;
+		c += sizeof(DnsPktQuery);
+	}
+	return i;
 }
 
 static unsigned __stdcall WorkerProc(void* data) {
@@ -362,10 +536,12 @@ static unsigned __stdcall WorkerProc(void* data) {
 		Fds[1].revents = 0;
 		int PollRes = LqPollCheck(Fds, CountFds, WaitTime);
 		if (Fds[0].revents & LQ_POLLIN) { //If have input task event
+			//printf("Event recived %s\n", Wrk->ServerInfo->Ip);
 			LqEventReset(Fds[0].fd);
 			if ((Wrk->StartTsk != NULL) && (Socket == -1)) { //???? ???? ?????????? ? HTTPS ????????, ??????????
 				Socket = ConnConnectTCP(Wrk->ServerInfo->Ip, Wrk->ServerInfo->Port);
 				if (Socket == -1) {
+					//printf("Conn error %s\n", Wrk->ServerInfo->Ip);
 					goto lblPollHup;
 				}
 				ssl = SSL_new(ctx);
@@ -382,6 +558,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 				Fds[1].fd = Socket;
 				Fds[1].events = LQ_POLLHUP;
 				CountFds = 2;
+				//printf("Conn created %s\n", Wrk->ServerInfo->Ip);
 			}
 			for (;;) {
 				Wrk->TskLoker.LockReadYield();
@@ -448,8 +625,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 			if (FilledSize <= 0) {
 				Fds[1].events &= ~LQ_POLLOUT;
 				WaitTime = DisconnectWaitTime;
-			}
-			else {
+			} else {
 				WaitTime = 500;
 			}
 		}
@@ -503,14 +679,12 @@ static unsigned __stdcall WorkerProc(void* data) {
 				}
 				c += 4;
 
-
 				Wrk->TskLoker.LockReadYield();
 				DnsReq* FisrtReq = Wrk->EndTsk;
 				Wrk->TskLoker.UnlockRead();
 				if (RetStatus == 200) {
 					sendto(UDPSocket, c, ContentLen, 0, (sockaddr*)&FisrtReq->From, FisrtReq->FromLen);
-				}
-				else {
+				} else {
 					if (ContentLen == -1)
 						ContentLen = 0;
 				}
@@ -522,8 +696,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 				}
 				if (Wrk->EndTsk == NULL) {
 					Wrk->StartTsk = NULL;
-				}
-				else {
+				} else {
 					Wrk->EndTsk->NextTsk = NULL;
 				}
 				Wrk->TskLen--;
@@ -534,11 +707,15 @@ static unsigned __stdcall WorkerProc(void* data) {
 
 				memmove(ReciveBuffer, c + ContentLen, ReciveBufferFilledPosEnd - (c + ContentLen));
 				ReciveBufferFilledPosEnd -= ((c + ContentLen) - ReciveBuffer);
+
+				if (ReciveBufferFilledPosEnd > ReciveBuffer)
+					goto lblContinue2;
 			}
 		}
 
 		if ((Fds[1].revents & LQ_POLLHUP) || ((WaitTime == DisconnectWaitTime) && (PollRes == 0)) || Wrk->IsEndWork) {
 		lblPollHup:;
+			//printf("Conn closed %s\n", Wrk->ServerInfo->Ip);
 			if (ssl != NULL) {
 				SSL_shutdown(ssl);
 				SSL_free(ssl);
@@ -585,10 +762,11 @@ VOID UpdateServiceStatus(DWORD currentState) {
 }
 
 static unsigned __stdcall MainDOH(void* data) {
-
 	OutputDebugString(TEXT("DOH_Windows: Start DOH_Main()"));
 
 	StopServiceEvent = LqEventCreate(1);
+
+	char HostsListInputReq[4096];
 
 	int ConfigFileSize;
 	char ConfigFile2[] =
@@ -609,9 +787,10 @@ static unsigned __stdcall MainDOH(void* data) {
 		fseek(OpenedConfigFile, 0, SEEK_END);
 		ConfigFileSize = ftell(OpenedConfigFile);
 		fseek(OpenedConfigFile, 0, SEEK_SET);
-		ConfigFile = (char*)malloc(ConfigFileSize);
+		ConfigFile = (char*)malloc(ConfigFileSize + 2);
 		fread(ConfigFile, 1, ConfigFileSize, OpenedConfigFile);
 		fclose(OpenedConfigFile);
+		ConfigFile[ConfigFileSize] = '\0';
 	}
 
 	ParseConfigFile(ConfigFileSize, ConfigFile);
@@ -634,7 +813,7 @@ static unsigned __stdcall MainDOH(void* data) {
 		Wrk->IsEndWork = false;
 		Wrk->Event = LqEventCreate(1);
 		Wrk->ServerInfo = &(ServersInfo[i % CountServers]);
-		uintptr_t Handler = _beginthreadex(NULL, 0, WorkerProc, Wrk, 0, &Wrk->TreadId);
+		uintptr_t Handler = _beginthreadex(NULL, 0, WorkerProc, Wrk, 0, &Wrk->ThreadId);
 		Wrk->ThreadHandle = (HANDLE)Handler;
 	}
 	OutputDebugString(TEXT("DOH_Windows: Enter "));
@@ -659,6 +838,55 @@ static unsigned __stdcall MainDOH(void* data) {
 			goto lblContinue5;
 		}
 		Req->BufLen = res;
+
+		if (CountRspHosts > 0) { //If have hosts list, then enum all elements in host list and match patterns
+			int CountQuer = GetDomainsNamesFromDNSPkt(Req->Buf, Req->BufLen, HostsListInputReq, sizeof(HostsListInputReq));
+			if (CountQuer > 0) {
+				char* c = HostsListInputReq;
+				for (int i = 0; i < CountQuer; i++) {
+					char* t = c;
+					for (int k = 0; k < CountRspHosts; k++) {
+						if (match(RspHosts[k].Name, t)) {
+							if(RspHosts[k].IsNotResponse)
+								goto lblContinue5;
+							int RspLen = 0;
+							if (RspHosts[k].RspIP.Addr.sa_family == AF_INET) {
+								if((Req->BufLen + sizeof(DnsPktResp) + 4) >= sizeof(Req->Buf))
+									goto lblContinue5;
+								RspLen = (Req->BufLen + sizeof(DnsPktResp) + 3);
+							} else {
+								if ((Req->BufLen + sizeof(DnsPktResp) + 16) >= sizeof(Req->Buf))
+									goto lblContinue5;
+								RspLen = (Req->BufLen + sizeof(DnsPktResp) + 15);
+							}
+							DnsPkt* DnsVal = (DnsPkt*)Req->Buf;
+							DnsPktResp* Response = (DnsPktResp*)(((char*)DnsVal) + Req->BufLen);
+							DnsVal->AnsRRs = htons(1u);
+							DnsVal->Flags |= htons(0x8000u);
+							Response->Class = htons(0x0001u);
+							Response->TTL = htonl(200);
+							Response->Name = htons(0xC00Cu);
+
+							if (RspHosts[k].RspIP.Addr.sa_family == AF_INET) {
+								Response->Type = htons(1u);
+								Response->DataLen = htons(4u);
+								memcpy(Response->IpAddr, &RspHosts[k].RspIP.AddrInet.sin_addr, 4);
+							} else {
+								Response->Type = htons(28u);
+								Response->DataLen = htons(16u);
+								memcpy(Response->IpAddr, &RspHosts[k].RspIP.AddrInet6.sin6_addr, 16);
+							}
+							sendto(UDPSocket, (char*)Req->Buf, RspLen, 0, (sockaddr*)&Req->From, Req->FromLen);
+							goto lblContinue5;
+						}
+					}
+					for (; *c != '\0'; c++);
+					c++;
+				}
+			}
+		}
+		
+
 		int TargetWrk = 0;
 		for (int i = 0, MinTskLen = 0x7fffffff; i < CountWorkers; i++) {
 			if (Workers[i]->TskLen < MinTskLen) {
@@ -715,6 +943,11 @@ static unsigned __stdcall MainDOH(void* data) {
 	if (LocalPort2 != LocalPort) {
 		free(LocalPort);
 	}
+	if (CountRspHosts > 0) {
+		for (int i = 0; i < CountRspHosts; i++)
+			free(RspHosts[i].Name);
+		free(RspHosts);
+	}
 	UpdateServiceStatus(SERVICE_STOPPED);
 	return 0;
 }
@@ -746,6 +979,11 @@ DWORD ServiceHandler(DWORD controlCode, DWORD eventType, LPVOID eventData, LPVOI
 
 	return NO_ERROR;
 }
+
+//int main() {
+//	MainDOH(NULL);
+//	return 0;
+//}
 
 extern "C" __declspec(dllexport) VOID WINAPI ServiceMain(DWORD argc, LPTSTR argv[]) {
 	OutputDebugString(TEXT("DOH_Windows: Start ServiceMain()"));

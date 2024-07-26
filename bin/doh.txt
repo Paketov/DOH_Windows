@@ -1,9 +1,19 @@
 CountWorkers:
- 4
+ 2
 DisconnectWaitTime:
  20000
 LocalAddress:
  0.0.0.0 53
 DOHServers:
- 1.1.1.1 443 https://cloudflare-dns.com/dns-query
  8.8.8.8 443 https://dns.google/dns-query
+ 149.112.112.112 443 https://dns.quad9.net/dns-query
+HostsMatch:
+  ?*.lon.llnw.net$		0.0.0.0
+  ?*.telemetry.microsoft.com$
+  ?*.telemetry.microsoft.com.nsatc.net$
+  ?*.mp.microsoft.com$
+  ?*.wns.windows.com$
+  ^windowsupdate.com$
+  ^checkappexec.microsoft.com$
+  ^push.services.mozilla.com$
+

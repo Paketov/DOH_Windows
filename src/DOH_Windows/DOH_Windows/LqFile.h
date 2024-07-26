@@ -92,12 +92,16 @@ typedef uint16_t                LqEvntFlag;
 
 typedef long long               LqTimeMillisec;
 
+#pragma pack(push)
+#pragma pack(1)
 
 typedef struct LqPoll {
 	int   fd;         /* file descriptor */
 	short events;     /* requested events */
 	short revents;    /* returned events */
 } LqPoll;
+
+#pragma pack(pop)
 
 int LqDescrSetInherit(int Descriptor, int IsInherit);
 
