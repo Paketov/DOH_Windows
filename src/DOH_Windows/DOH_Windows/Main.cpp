@@ -919,7 +919,7 @@ static unsigned __stdcall MainDOH(void* data) {
 		for (int i = 0; i < CountWorkers; i++) {
 			Workers[i]->IsEndWork = true;
 			LqEventSet(Workers[i]->Event);
-			Sleep(700);
+			WaitForSingleObject(Workers[i]->ThreadHandle, INFINITE);
 			LqFastAlloc::Delete(Workers[i]);
 		}
 		free(Workers);
