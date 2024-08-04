@@ -920,10 +920,13 @@ static unsigned __stdcall MainDOH(void* data) {
 			Workers[i]->IsEndWork = true;
 			LqEventSet(Workers[i]->Event);
 			WaitForSingleObject(Workers[i]->ThreadHandle, INFINITE);
+			CloseHandle(Workers[i]->ThreadHandle);
 			LqFastAlloc::Delete(Workers[i]);
 		}
 		free(Workers);
 	}
+
+	closesocket(UDPSocket);
 
 	if (ConfigFile2 != ConfigFile) {
 		free(ConfigFile);
