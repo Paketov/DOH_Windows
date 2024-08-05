@@ -132,6 +132,10 @@ int LqEventReset(int FileEvent) {
 	return PrevVal ? 1 : 0;
 }
 
+int LqFileClose(int Fd) {
+	return (NtClose((HANDLE)Fd) == TRUE) ? 0 : -1;
+}
+
 void LqThreadYield() {
 	Sleep(0);
 }
@@ -522,6 +526,10 @@ int LqEventReset(int FileEvent) {
 
 void LqThreadYield() {
 	usleep(0);
+}
+
+int LqFileClose(int Fd) {
+	return close(Fd);
 }
 
 

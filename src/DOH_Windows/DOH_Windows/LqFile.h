@@ -119,6 +119,8 @@ int LqEventReset(int FileEvent);
 
 void LqThreadYield();
 
+int LqFileClose(int Fd);
+
 int LqPollCheck(LqPoll* Fds, size_t CountFds, LqTimeMillisec TimeoutMillisec);
 
 short LqPollCheckSingle(int Fd, short Events, LqTimeMillisec TimeoutMillisec);

@@ -234,7 +234,7 @@ HttpsServerInfo* ServersInfo = NULL;
 LqTimeMillisec DisconnectWaitTime = 12000; //12 seconds
 char* LocalAddress = "0.0.0.0", *LocalAddress2 = LocalAddress;
 char* LocalPort = "53", *LocalPort2 = LocalPort;
-int StopServiceEvent = NULL;
+int StopServiceEvent = -1;
 int CountRspHosts = 0;
 ResponceHost* RspHosts = NULL;
 
@@ -259,6 +259,10 @@ static void ParseConfigFile(int ConfigFileSize, char* ConfigFile) {
 	CountRspHosts = 0;
 	ServersInfo = NULL;
 	RspHosts = NULL;
+	DisconnectWaitTime = 12000;
+	LocalAddress = LocalAddress2;
+	LocalPort = LocalPort2;
+
 
 	for (char* c = ConfigFile, *m = c + ConfigFileSize; (c < m) && (*c != '\0'); ) {
 		for (; (c < m) && ((*c == ' ') || (*c == '\t') || (*c == '\n') || (*c == '\r')); c++);
@@ -806,13 +810,18 @@ static unsigned __stdcall MainDOH(void* data) {
 
 	OutputDebugString(TEXT("DOH_Windows: SSL_library_init() executed"));
 	UDPSocket = ConnBindUDP(LocalAddress, LocalPort, 1024);
-	if (UDPSocket == -1) 
+	if (UDPSocket == -1) {
+		OutputDebugString(TEXT("DOH_Windows: Error not binded to UDP port"));
 		goto lblOut;
+	}
 	OutputDebugString(TEXT("DOH_Windows: ConnBindUDP() executed"));
 
 	CountWorkers = max(CountWorkers, CountServers);
-	if (CountServers < 1)
+	if (CountServers < 1) {
+		OutputDebugString(TEXT("DOH_Windows: DOH_Main() Error CountServers < 1"));
+		closesocket(UDPSocket);
 		goto lblOut;
+	}
 	Workers = (Worker**)malloc(sizeof(*Workers) * CountWorkers);
 
 	for (int i = 0; i < CountWorkers; i++) {
@@ -837,7 +846,7 @@ static unsigned __stdcall MainDOH(void* data) {
 
 		int res = recvfrom(UDPSocket, (char*)Req->Buf, sizeof(Req->Buf), 0, (sockaddr*)&Req->From, &Req->FromLen);
 		if (LqPollCheckSingle(StopServiceEvent, LQ_POLLIN, 1) & LQ_POLLIN) {
-			OutputDebugString(TEXT("DOH_Windows: Recive stop event"));
+			OutputDebugString(TEXT("DOH_Windows: MainDOH() recive stop event"));
 			break;
 		}
 
@@ -935,7 +944,7 @@ lblOut:
 			LqEventSet(Workers[i]->Event);
 			WaitForSingleObject(Workers[i]->ThreadHandle, INFINITE);
 			CloseHandle(Workers[i]->ThreadHandle);
-			CloseHandle((HANDLE)Workers[i]->Event);
+			LqFileClose(Workers[i]->Event);
 			LqFastAlloc::Delete(Workers[i]);
 		}
 		free(Workers);
@@ -968,9 +977,9 @@ lblOut:
 			free(RspHosts[i].Name);
 		free(RspHosts);
 	}
-	CloseHandle((HANDLE)StopServiceEvent);
+	if(StopServiceEvent != -1)
+		LqFileClose(StopServiceEvent);
 
-	OutputDebugString(TEXT("DOH_Windows: UpdateServiceStatus(SERVICE_STOPPED) in execute"));
 	UpdateServiceStatus(SERVICE_STOPPED);
 	OutputDebugString(TEXT("DOH_Windows: Service return from MainDOH()"));
 	return 0;
@@ -983,13 +992,15 @@ DWORD WINAPI ServiceHandler(DWORD dwControl) {
 		OutputDebugString(TEXT("DOH_Windows: Runing ServiceHandler(SERVICE_CONTROL_STOP)"));
 		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
 		LqEventSet(StopServiceEvent);
-		closesocket(UDPSocket);
+		if(UDPSocket != -1)
+			closesocket(UDPSocket);
 		break;
 	case SERVICE_CONTROL_SHUTDOWN:
 		OutputDebugString(TEXT("DOH_Windows: Runing ServiceHandler(SERVICE_CONTROL_SHUTDOWN)"));
 		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
 		LqEventSet(StopServiceEvent);
-		closesocket(UDPSocket);
+		if(UDPSocket != -1)
+			closesocket(UDPSocket);
 		break;
 	case SERVICE_CONTROL_PAUSE:
 		OutputDebugString(TEXT("DOH_Windows: Runing ServiceHandler(SERVICE_CONTROL_PAUSE)"));
