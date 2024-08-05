@@ -255,6 +255,11 @@ static void ParseConfigFile(int ConfigFileSize, char* ConfigFile) {
 	} CUR_READ_STATE;
 	CUR_READ_STATE State = CUR_STATE_DEFAULT;
 
+	CountServers = 0;
+	CountRspHosts = 0;
+	ServersInfo = NULL;
+	RspHosts = NULL;
+
 	for (char* c = ConfigFile, *m = c + ConfigFileSize; (c < m) && (*c != '\0'); ) {
 		for (; (c < m) && ((*c == ' ') || (*c == '\t') || (*c == '\n') || (*c == '\r')); c++);
 		if ((c >= m) || (*c == '\0'))
@@ -781,7 +786,7 @@ static unsigned __stdcall MainDOH(void* data) {
 
 	ConfigFileSize = sizeof(ConfigFile2);
 
-
+	OutputDebugString(TEXT("DOH_Windows: DOH_Main() open doh.txt"));
 	FILE* OpenedConfigFile = fopen("C:\\Windows\\System32\\drivers\\etc\\doh.txt", "rb");
 	if (OpenedConfigFile != NULL) {
 		fseek(OpenedConfigFile, 0, SEEK_END);
@@ -791,17 +796,23 @@ static unsigned __stdcall MainDOH(void* data) {
 		fread(ConfigFile, 1, ConfigFileSize, OpenedConfigFile);
 		fclose(OpenedConfigFile);
 		ConfigFile[ConfigFileSize] = '\0';
+		OutputDebugString(TEXT("DOH_Windows: DOH_Main() doh.txt readed"));
 	}
 
 	ParseConfigFile(ConfigFileSize, ConfigFile);
-
+	OutputDebugString(TEXT("DOH_Windows: ParseConfigFile() executed"));
 	SSL_load_error_strings();
 	SSL_library_init();
 
+	OutputDebugString(TEXT("DOH_Windows: SSL_library_init() executed"));
 	UDPSocket = ConnBindUDP(LocalAddress, LocalPort, 1024);
+	if (UDPSocket == -1) 
+		goto lblOut;
+	OutputDebugString(TEXT("DOH_Windows: ConnBindUDP() executed"));
+
 	CountWorkers = max(CountWorkers, CountServers);
 	if (CountServers < 1)
-		return 0;
+		goto lblOut;
 	Workers = (Worker**)malloc(sizeof(*Workers) * CountWorkers);
 
 	for (int i = 0; i < CountWorkers; i++) {
@@ -816,7 +827,7 @@ static unsigned __stdcall MainDOH(void* data) {
 		uintptr_t Handler = _beginthreadex(NULL, 0, WorkerProc, Wrk, 0, &Wrk->ThreadId);
 		Wrk->ThreadHandle = (HANDLE)Handler;
 	}
-	OutputDebugString(TEXT("DOH_Windows: Enter "));
+	OutputDebugString(TEXT("DOH_Windows: Enter recvfrom loop"));
 	UpdateServiceStatus(SERVICE_RUNNING);
 	for (;;) {
 		DnsReq* Req = LqFastAlloc::New<DnsReq>();
@@ -826,6 +837,7 @@ static unsigned __stdcall MainDOH(void* data) {
 
 		int res = recvfrom(UDPSocket, (char*)Req->Buf, sizeof(Req->Buf), 0, (sockaddr*)&Req->From, &Req->FromLen);
 		if (LqPollCheckSingle(StopServiceEvent, LQ_POLLIN, 1) & LQ_POLLIN) {
+			OutputDebugString(TEXT("DOH_Windows: Recive stop event"));
 			break;
 		}
 
@@ -913,7 +925,9 @@ static unsigned __stdcall MainDOH(void* data) {
 		Workers[TargetWrk]->TskLoker.UnlockWrite();
 		LqEventSet(Workers[TargetWrk]->Event);
 	}
-	OutputDebugString(TEXT("DOH_Windows: Service stopped"));
+lblOut:
+
+	OutputDebugString(TEXT("DOH_Windows: Service stopping in process"));
 
 	if (Workers != NULL) {
 		for (int i = 0; i < CountWorkers; i++) {
@@ -921,12 +935,14 @@ static unsigned __stdcall MainDOH(void* data) {
 			LqEventSet(Workers[i]->Event);
 			WaitForSingleObject(Workers[i]->ThreadHandle, INFINITE);
 			CloseHandle(Workers[i]->ThreadHandle);
+			CloseHandle((HANDLE)Workers[i]->Event);
 			LqFastAlloc::Delete(Workers[i]);
 		}
 		free(Workers);
 	}
-
-	closesocket(UDPSocket);
+	//if (UDPSocket != -1) {
+	//	closesocket(UDPSocket);
+	//}
 
 	if (ConfigFile2 != ConfigFile) {
 		free(ConfigFile);
@@ -946,30 +962,41 @@ static unsigned __stdcall MainDOH(void* data) {
 	if (LocalPort2 != LocalPort) {
 		free(LocalPort);
 	}
+
 	if (CountRspHosts > 0) {
 		for (int i = 0; i < CountRspHosts; i++)
 			free(RspHosts[i].Name);
 		free(RspHosts);
 	}
+	CloseHandle((HANDLE)StopServiceEvent);
+
+	OutputDebugString(TEXT("DOH_Windows: UpdateServiceStatus(SERVICE_STOPPED) in execute"));
 	UpdateServiceStatus(SERVICE_STOPPED);
+	OutputDebugString(TEXT("DOH_Windows: Service return from MainDOH()"));
 	return 0;
 }
 
 
-DWORD ServiceHandler(DWORD controlCode, DWORD eventType, LPVOID eventData, LPVOID context) {
-	switch (controlCode) {
+DWORD WINAPI ServiceHandler(DWORD dwControl) {
+	switch (dwControl) {
 	case SERVICE_CONTROL_STOP:
-		serviceStatus.dwCurrentState = SERVICE_STOPPED;
+		OutputDebugString(TEXT("DOH_Windows: Runing ServiceHandler(SERVICE_CONTROL_STOP)"));
+		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
 		LqEventSet(StopServiceEvent);
+		closesocket(UDPSocket);
 		break;
 	case SERVICE_CONTROL_SHUTDOWN:
-		serviceStatus.dwCurrentState = SERVICE_STOPPED;
+		OutputDebugString(TEXT("DOH_Windows: Runing ServiceHandler(SERVICE_CONTROL_SHUTDOWN)"));
+		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
 		LqEventSet(StopServiceEvent);
+		closesocket(UDPSocket);
 		break;
 	case SERVICE_CONTROL_PAUSE:
+		OutputDebugString(TEXT("DOH_Windows: Runing ServiceHandler(SERVICE_CONTROL_PAUSE)"));
 		serviceStatus.dwCurrentState = SERVICE_PAUSED;
 		break;
 	case SERVICE_CONTROL_CONTINUE:
+		OutputDebugString(TEXT("DOH_Windows: Runing ServiceHandler(SERVICE_CONTROL_CONTINUE)"));
 		serviceStatus.dwCurrentState = SERVICE_RUNNING;
 		break;
 	case SERVICE_CONTROL_INTERROGATE:
@@ -977,8 +1004,9 @@ DWORD ServiceHandler(DWORD controlCode, DWORD eventType, LPVOID eventData, LPVOI
 	default:
 		break;
 	}
-
-	UpdateServiceStatus(SERVICE_RUNNING);
+	//serviceStatus.dwCurrentState
+	UpdateServiceStatus(serviceStatus.dwCurrentState);
+	//UpdateServiceStatus(SERVICE_RUNNING);
 
 	return NO_ERROR;
 }
@@ -995,7 +1023,10 @@ extern "C" __declspec(dllexport) VOID WINAPI ServiceMain(DWORD argc, LPTSTR argv
 
 	serviceStatus.dwServiceType = SERVICE_WIN32_SHARE_PROCESS;
 	serviceStatus.dwServiceSpecificExitCode = 0;
-
+	serviceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP;
+	serviceStatus.dwWin32ExitCode = NO_ERROR;
+	serviceStatus.dwServiceSpecificExitCode = 0;
+	serviceStatus.dwCheckPoint = 0;
 	UpdateServiceStatus(SERVICE_START_PENDING);
 
 	//unsigned int ThreadId = 0;
