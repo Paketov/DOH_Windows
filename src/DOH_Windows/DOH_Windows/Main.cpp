@@ -675,6 +675,9 @@ static unsigned __stdcall WorkerProc(void* data) {
 								u += (sizeof("content-length") - 1);
 								for (; (u < c) && ((*u == '\t') || (*u == ' ') || (*u == ':')); u++);
 								ContentLen = atoi(u);
+								if ((ContentLen <= 0) || (ContentLen > (((int)sizeof(ReciveBuffer)) - ((c + 20) - ReciveBuffer))))
+									goto lblPollHup;
+
 								goto lblContinue3;
 							}
 						}
