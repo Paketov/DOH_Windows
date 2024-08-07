@@ -934,8 +934,8 @@ static unsigned __stdcall MainDOH(void* data) {
 			Workers[TargetWrk]->CurTsk = Req;
 		}
 		Workers[TargetWrk]->TskLen++;
-		Workers[TargetWrk]->TskLoker.UnlockWrite();
 		LqEventSet(Workers[TargetWrk]->Event);
+		Workers[TargetWrk]->TskLoker.UnlockWrite();
 	}
 lblOut:
 
@@ -943,8 +943,10 @@ lblOut:
 
 	if (Workers != NULL) {
 		for (int i = 0; i < CountWorkers; i++) {
+			Workers[i]->TskLoker.LockWriteYield();
 			Workers[i]->IsEndWork = true;
 			LqEventSet(Workers[i]->Event);
+			Workers[i]->TskLoker.UnlockWrite();
 			WaitForSingleObject(Workers[i]->ThreadHandle, INFINITE);
 			CloseHandle(Workers[i]->ThreadHandle);
 			LqFileClose(Workers[i]->Event);
