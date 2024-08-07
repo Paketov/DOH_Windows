@@ -747,7 +747,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 			ReciveBufferFilledPosEnd = ReciveBuffer;
 
 			Wrk->TskLoker.LockWriteYield();
-			LqEventReset(Fds[0].fd);
+			//LqEventReset(Fds[0].fd);
 			for (DnsReq* r = Wrk->StartTsk, *f; r != NULL; r = f) {
 				f = r->NextTsk;
 				LqFastAlloc::Delete(r);
