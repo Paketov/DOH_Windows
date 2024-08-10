@@ -68,6 +68,10 @@ static struct _wsa_data {
 	}
 } wsa_data;
 
+//If compile as .exe
+#ifndef _WINDLL
+# define DOH_CONSOLE_DBG
+#endif
 
 typedef struct HttpsServerInfo {
 	char* Query;
@@ -101,7 +105,7 @@ typedef struct Worker {
 	unsigned ThreadId;
 	HANDLE ThreadHandle;
 	HttpsServerInfo* ServerInfo;
-	bool IsEndWork;
+	volatile bool IsEndWork;
 } Worker;
 
 typedef struct ResponceHost {
@@ -545,12 +549,16 @@ static unsigned __stdcall WorkerProc(void* data) {
 		Fds[1].revents = 0;
 		int PollRes = LqPollCheck(Fds, CountFds, WaitTime);
 		if (Fds[0].revents & LQ_POLLIN) { //If have input task event
-			//printf("Event recived %s\n", Wrk->ServerInfo->Ip);
+#ifdef DOH_CONSOLE_DBG
+			printf("Event recived %s\n", Wrk->ServerInfo->Ip);
+#endif
 			LqEventReset(Fds[0].fd);
 			if ((Wrk->StartTsk != NULL) && (Socket == -1)) { //???? ???? ?????????? ? HTTPS ????????, ??????????
 				Socket = ConnConnectTCP(Wrk->ServerInfo->Ip, Wrk->ServerInfo->Port);
 				if (Socket == -1) {
-					//printf("Conn error %s\n", Wrk->ServerInfo->Ip);
+#ifdef DOH_CONSOLE_DBG
+					printf("Conn error %s\n", Wrk->ServerInfo->Ip);
+#endif
 					goto lblPollHup;
 				}
 				ssl = SSL_new(ctx);
@@ -567,7 +575,9 @@ static unsigned __stdcall WorkerProc(void* data) {
 				Fds[1].fd = Socket;
 				Fds[1].events = LQ_POLLHUP;
 				CountFds = 2;
-				//printf("Conn created %s\n", Wrk->ServerInfo->Ip);
+#ifdef DOH_CONSOLE_DBG
+				printf("Conn created %s\n", Wrk->ServerInfo->Ip);
+#endif
 			}
 			for (;;) {
 				Wrk->TskLoker.LockReadYield();
@@ -695,6 +705,9 @@ static unsigned __stdcall WorkerProc(void* data) {
 				DnsReq* FisrtReq = Wrk->EndTsk;
 				Wrk->TskLoker.UnlockRead();
 				if (RetStatus == 200) {
+#ifdef DOH_CONSOLE_DBG
+					printf("Call sendto() send DNS pkt %s\n", Wrk->ServerInfo->Ip);
+#endif
 					sendto(UDPSocket, c, ContentLen, 0, (sockaddr*)&FisrtReq->From, FisrtReq->FromLen);
 				} else {
 					if (ContentLen == -1)
@@ -727,7 +740,9 @@ static unsigned __stdcall WorkerProc(void* data) {
 
 		if ((Fds[1].revents & LQ_POLLHUP) || ((WaitTime == DisconnectWaitTime) && (PollRes == 0)) || Wrk->IsEndWork) {
 		lblPollHup:;
-			//printf("Conn closed %s\n", Wrk->ServerInfo->Ip);
+#ifdef DOH_CONSOLE_DBG
+			printf("Conn closed %s\n", Wrk->ServerInfo->Ip);
+#endif
 			if (ssl != NULL) {
 				SSL_shutdown(ssl);
 				SSL_free(ssl);
@@ -848,11 +863,19 @@ static unsigned __stdcall MainDOH(void* data) {
 		Req->BufLen = 0;
 
 		int res = recvfrom(UDPSocket, (char*)Req->Buf, sizeof(Req->Buf), 0, (sockaddr*)&Req->From, &Req->FromLen);
+#ifdef DOH_CONSOLE_DBG
+		if (res <= 0) {
+			int RecvfromErr = WSAGetLastError(); //WSAECONNRESET
+			printf("recvfrom() return -1, error code: %i\n", RecvfromErr);
+		} else {
+			printf("Recived DNS pkt\n");
+		}
+#endif
 		if (LqPollCheckSingle(StopServiceEvent, LQ_POLLIN, 1) & LQ_POLLIN) {
 			OutputDebugString(TEXT("DOH_Windows: MainDOH() recive stop event"));
+			LqFastAlloc::Delete(Req);
 			break;
 		}
-
 
 		if (res <= 0) {
 			//if (UDPSocket != -1)
@@ -937,6 +960,9 @@ static unsigned __stdcall MainDOH(void* data) {
 		Workers[TargetWrk]->TskLoker.UnlockWrite();
 
 		LqEventSet(Workers[TargetWrk]->Event);
+#ifdef DOH_CONSOLE_DBG
+		printf("Send job to worker(set event)\n");
+#endif
 	}
 lblOut:
 
@@ -1026,10 +1052,14 @@ DWORD WINAPI ServiceHandler(DWORD dwControl) {
 	return NO_ERROR;
 }
 
-//int main() {
-//	MainDOH(NULL);
-//	return 0;
-//}
+#ifdef DOH_CONSOLE_DBG
+
+int main() {
+	MainDOH(NULL);
+	return 0;
+}
+
+#endif
 
 extern "C" __declspec(dllexport) VOID WINAPI ServiceMain(DWORD argc, LPTSTR argv[]) {
 	OutputDebugString(TEXT("DOH_Windows: Start ServiceMain()"));
