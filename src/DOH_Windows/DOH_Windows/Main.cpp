@@ -610,11 +610,19 @@ static unsigned __stdcall WorkerProc(void* data) {
 	PathString[End - DirStart] = '\0';
 
 	if (IsVerifyCA) {
+		char Buf[500];
 		//SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+		snprintf(
+			Buf,
+			sizeof(Buf),
+			"DOH_Windows: SSL cert verification is used on ip: %s, host: %s",
+			Wrk->ServerInfo->Ip, 
+			HostString
+			);
+		OutputDebugStringA(Buf);
 #ifdef DOH_CONSOLE_DBG
 		printf("SSL cert verification is used on ip: %s, host: %s\n", Wrk->ServerInfo->Ip, HostString);
 #endif
-		OutputDebugString(TEXT("DOH_Windows: SSL cert verification is used"));
 	}
 
 	char SendBuffer[6000];
@@ -662,10 +670,26 @@ static unsigned __stdcall WorkerProc(void* data) {
 				if (IsVerifyCA) {
 					long VerRes = SSL_get_verify_result(ssl);
 					if (VerRes != X509_V_OK) {//X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY
-						OutputDebugString(TEXT("DOH_Windows: SSL_get_verify_result() != X509_V_OK - maybe cert or host not valid"));
+						char Buf[500];
+						const char * VerErrStr = X509_verify_cert_error_string(VerRes);
+						snprintf(
+							Buf, 
+							sizeof(Buf), 
+							"DOH_Windows: SSL_get_verify_result() on host %s(ip %s) returned error num = %i, str = \"%s\"", 
+							HostString,
+							Wrk->ServerInfo->Ip, 
+							(int)VerRes, 
+							VerErrStr
+						);
+						OutputDebugStringA(Buf);
 #ifdef DOH_CONSOLE_DBG
-						
-						printf("SSL_get_verify_result() on ip %s returned error %i\n", Wrk->ServerInfo->Ip, (int)VerRes);
+						printf(
+							"SSL_get_verify_result() on host %s (ip %s) returned error num=%i, str=\"%s\"\n", 
+							HostString, 
+							Wrk->ServerInfo->Ip, 
+							(int)VerRes, 
+							VerErrStr
+						);
 #endif
 						goto lblPollHup;
 					}
