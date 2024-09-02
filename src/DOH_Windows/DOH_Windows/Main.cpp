@@ -26,6 +26,11 @@
 # include <stdio.h>
 # include <stdint.h>
 # include <process.h>
+# include <wincrypt.h>
+# include <cryptuiapi.h>
+
+# pragma comment (lib, "crypt32.lib")
+# pragma comment (lib, "cryptui.lib")
 
 #else
 # include <sys/socket.h> 
@@ -43,6 +48,9 @@
 #include <openssl/pem.h>
 #include <openssl/ssl.h>
 #include <openssl/err.h>
+#include <openssl/x509v3.h>
+#include <openssl/opensslv.h>
+
 
 
 #include "LqAlloc.hpp"
@@ -241,6 +249,7 @@ char* LocalPort = "53", *LocalPort2 = LocalPort;
 int StopServiceEvent = -1;
 int CountRspHosts = 0;
 ResponceHost* RspHosts = NULL;
+char*SSL_CACertFileForVerify = NULL;
 
 
 //Service
@@ -266,6 +275,7 @@ static void ParseConfigFile(int ConfigFileSize, char* ConfigFile) {
 	DisconnectWaitTime = 12000;
 	LocalAddress = LocalAddress2;
 	LocalPort = LocalPort2;
+	SSL_CACertFileForVerify = NULL;
 
 
 	for (char* c = ConfigFile, *m = c + ConfigFileSize; (c < m) && (*c != '\0'); ) {
@@ -305,6 +315,19 @@ static void ParseConfigFile(int ConfigFileSize, char* ConfigFile) {
 			c += (sizeof("hostsmatch:") - 1);
 			for (; (c < m) && ((*c == ' ') || (*c == '\t') || (*c == ':')); c++);
 			continue;
+		}
+
+		if (strnicmp(c, "cacertfile:", sizeof("cacertfile:") - 1) == 0) { //pem file for verify root certs
+			State = CUR_STATE_DEFAULT;
+			c += (sizeof("cacertfile:") - 1);
+			for (; (c < m) && ((*c == ' ') || (*c == '\t') || (*c == ':') || (*c == '\n') || (*c == '\r')); c++);
+			char* StartPath = c;
+			for (; (c < m) && (*c != '\n') && (*c != '\r'); c++);
+			char* EndPath = c;
+
+			SSL_CACertFileForVerify = (char*)malloc((EndPath - StartPath) + 10);
+			strncpy(SSL_CACertFileForVerify, StartPath, EndPath - StartPath);
+			SSL_CACertFileForVerify[EndPath - StartPath] = '\0';
 		}
 
 		switch (State) {
@@ -490,12 +513,63 @@ static int GetDomainsNamesFromDNSPkt(const void* Dns, size_t DnsLen, char* DstBu
 	return i;
 }
 
+static bool SetWindowsSSLStoreCerts(X509_STORE* X509_store) {
+	HCERTSTORE hStore;
+	PCCERT_CONTEXT pContext = NULL;
+	X509 *x509;
+
+	hStore = CertOpenSystemStoreW(NULL, L"ROOT");
+	if (!hStore)
+		return false;
+	while (pContext = CertEnumCertificatesInStore(hStore, pContext)) {
+		//uncomment the line below if you want to see the certificates as pop ups
+		//CryptUIDlgViewContext(CERT_STORE_CERTIFICATE_CONTEXT, pContext,   NULL, NULL, 0, NULL);
+		if (x509 = d2i_X509(NULL, (const unsigned char **)&pContext->pbCertEncoded, pContext->cbCertEncoded)){
+			X509_STORE_add_cert(X509_store, x509);
+			X509_free(x509);
+		}
+	}
+	CertFreeCertificateContext(pContext);
+	CertCloseStore(hStore, 0);
+	return true;
+}
+
 static unsigned __stdcall WorkerProc(void* data) {
 	Worker* Wrk = (Worker*)data;
 
 	int Socket = -1;
 	SSL_CTX* ctx = SSL_CTX_new(SSLv23_client_method());
 	SSL* ssl = NULL;
+	bool IsVerifyCA = true;
+	SSL_CTX_set_default_verify_paths(ctx);
+	if (SSL_CACertFileForVerify != NULL) {
+		if (SSL_CTX_load_verify_locations(ctx, SSL_CACertFileForVerify, NULL) != 1) {
+			OutputDebugString(TEXT("DOH_Windows: SSL SSL_CTX_load_verify_locations() returned 0, PEM file cert for verify not used"));
+#ifdef DOH_CONSOLE_DBG
+			printf("SSL_CTX_load_verify_locations() returned 0, PEM file cert for verify not used on ip %s\n", Wrk->ServerInfo->Ip);
+#endif
+			IsVerifyCA = false;
+		}
+	} else {
+		//Used for not get X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY error from SSL_get_verify_result()
+		X509_STORE* Store = SSL_CTX_get_cert_store(ctx);
+		if (Store == NULL) {
+			IsVerifyCA = false;
+#ifdef DOH_CONSOLE_DBG
+			printf("SSL_CTX_get_cert_store() returned NULL, cert verify not used on ip %s\n", Wrk->ServerInfo->Ip);
+#endif
+			OutputDebugString(TEXT("DOH_Windows: SSL SSL_CTX_get_cert_store() returned NULL, cert verify not used"));
+		} else {
+			if (!SetWindowsSSLStoreCerts(Store)) {
+				IsVerifyCA = false;
+#ifdef DOH_CONSOLE_DBG
+				printf("Cannot set local windows root certs, cert verify not used on ip %s\n", Wrk->ServerInfo->Ip);
+#endif
+				OutputDebugString(TEXT("DOH_Windows: SSL Cannot set local windows root certs, cert verify not used"));
+			}
+		}
+	}
+
 
 	LqTimeMillisec WaitTime = INFINITE;
 	int CountFds = 1;
@@ -535,6 +609,13 @@ static unsigned __stdcall WorkerProc(void* data) {
 	strncpy(PathString, DirStart, End - DirStart);
 	PathString[End - DirStart] = '\0';
 
+	if (IsVerifyCA) {
+		//SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+#ifdef DOH_CONSOLE_DBG
+		printf("SSL cert verification is used on ip: %s, host: %s\n", Wrk->ServerInfo->Ip, HostString);
+#endif
+		OutputDebugString(TEXT("DOH_Windows: SSL cert verification is used"));
+	}
 
 	char SendBuffer[6000];
 	char* SendBufferFilledPos = SendBuffer;
@@ -567,9 +648,29 @@ static unsigned __stdcall WorkerProc(void* data) {
 					goto lblPollHup;
 				}
 
-				if (SSL_connect(ssl) < 0) {
+				if (IsVerifyCA) {
+					SSL_set_hostflags(ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
+					if (!SSL_set1_host(ssl, HostString)) {
+						goto lblPollHup;
+					}
+				}
+				int SslConnectRes;
+				if ((SslConnectRes = SSL_connect(ssl)) < 0) {
 					goto lblPollHup;
 				}
+
+				if (IsVerifyCA) {
+					long VerRes = SSL_get_verify_result(ssl);
+					if (VerRes != X509_V_OK) {//X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY
+						OutputDebugString(TEXT("DOH_Windows: SSL_get_verify_result() != X509_V_OK - maybe cert or host not valid"));
+#ifdef DOH_CONSOLE_DBG
+						
+						printf("SSL_get_verify_result() on ip %s returned error %i\n", Wrk->ServerInfo->Ip, (int)VerRes);
+#endif
+						goto lblPollHup;
+					}
+				}
+				
 				LqConnSwitchNonBlock(Socket, true);
 				WaitTime = DisconnectWaitTime;
 				Fds[1].fd = Socket;
@@ -790,7 +891,6 @@ VOID UpdateServiceStatus(DWORD currentState) {
 
 static unsigned __stdcall MainDOH(void* data) {
 	OutputDebugString(TEXT("DOH_Windows: Start DOH_Main()"));
-
 	StopServiceEvent = LqEventCreate(1);
 
 	char HostsListInputReq[4096];
@@ -1000,6 +1100,9 @@ lblOut:
 	}
 	if (LocalPort2 != LocalPort) {
 		free(LocalPort);
+	}
+	if (SSL_CACertFileForVerify != NULL) {
+		free(SSL_CACertFileForVerify);
 	}
 
 	if (CountRspHosts > 0) {
