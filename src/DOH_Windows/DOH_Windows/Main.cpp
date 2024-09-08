@@ -251,8 +251,8 @@ int UDPSocket = -1;
 Worker** Workers = NULL;
 HttpsServerInfo* ServersInfo = NULL;
 LqTimeMillisec DisconnectWaitTime = 12000; //12 seconds
-char* LocalAddress = "0.0.0.0", *LocalAddress2 = LocalAddress;
-char* LocalPort = "53", *LocalPort2 = LocalPort;
+char* LocalAddress2 = "0.0.0.0", *LocalAddress = LocalAddress2;
+char* LocalPort2 = "53", *LocalPort = LocalPort2;
 volatile std::atomic<bool> IsStopService(false);
 int CountRspHosts = 0;
 ResponceHost* RspHosts = NULL;
@@ -1105,13 +1105,16 @@ lblOut:
 			LqFastAlloc::Delete(Workers[i]);
 		}
 		free(Workers);
+		Workers = NULL;
 	}
 	//if (UDPSocket != -1) {
 	//	closesocket(UDPSocket);
+	//	UDPSocket = -1;
 	//}
 
 	if (ConfigFile2 != ConfigFile) {
 		free(ConfigFile);
+		ConfigFile = ConfigFile2;
 	}
 	if (ServersInfo != NULL) {
 		for (int i = 0; i < CountServers; i++) {
@@ -1120,16 +1123,20 @@ lblOut:
 			free(ServersInfo[i].Query);
 		}
 		free(ServersInfo);
+		ServersInfo = NULL;
 	}
 
 	if (LocalAddress2 != LocalAddress) {
 		free(LocalAddress);
+		LocalAddress = LocalAddress2;
 	}
 	if (LocalPort2 != LocalPort) {
 		free(LocalPort);
+		LocalPort = LocalPort2;
 	}
 	if (SSL_CACertFileForVerify != NULL) {
 		free(SSL_CACertFileForVerify);
+		SSL_CACertFileForVerify = NULL;
 	}
 
 	if (CountRspHosts > 0) {
@@ -1150,7 +1157,7 @@ static DWORD WINAPI ServiceHandler(DWORD dwControl) {
 		OutputDebugString(TEXT("DOH_Windows: Runing ServiceHandler(SERVICE_CONTROL_STOP)"));
 		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
 		IsStopService.store(true);
-		if(UDPSocket != -1)
+		if (UDPSocket != -1)
 			closesocket(UDPSocket);
 		break;
 	case SERVICE_CONTROL_SHUTDOWN:
