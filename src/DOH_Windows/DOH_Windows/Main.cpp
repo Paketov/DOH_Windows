@@ -81,6 +81,13 @@ static struct _wsa_data {
 # define DOH_CONSOLE_DBG
 #endif
 
+#ifdef DOH_CONSOLE_DBG
+#define DbgConsolePrintf(fmt, ...) printf(fmt, __VA_ARGS__)
+#else
+#define DbgConsolePrintf(fmt, ...) do{} while(0)
+#endif
+
+
 typedef struct HttpsServerInfo {
 	char* Query;
 	char* Ip;
@@ -113,7 +120,7 @@ typedef struct Worker {
 	unsigned ThreadId;
 	HANDLE ThreadHandle;
 	HttpsServerInfo* ServerInfo;
-	volatile bool IsEndWork;
+	volatile std::atomic<bool> IsEndWork;
 } Worker;
 
 typedef struct ResponceHost {
@@ -246,7 +253,7 @@ HttpsServerInfo* ServersInfo = NULL;
 LqTimeMillisec DisconnectWaitTime = 12000; //12 seconds
 char* LocalAddress = "0.0.0.0", *LocalAddress2 = LocalAddress;
 char* LocalPort = "53", *LocalPort2 = LocalPort;
-int StopServiceEvent = -1;
+volatile std::atomic<bool> IsStopService(false);
 int CountRspHosts = 0;
 ResponceHost* RspHosts = NULL;
 char*SSL_CACertFileForVerify = NULL;
@@ -545,9 +552,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 	if (SSL_CACertFileForVerify != NULL) {
 		if (SSL_CTX_load_verify_locations(ctx, SSL_CACertFileForVerify, NULL) != 1) {
 			OutputDebugString(TEXT("DOH_Windows: SSL SSL_CTX_load_verify_locations() returned 0, PEM file cert for verify not used"));
-#ifdef DOH_CONSOLE_DBG
-			printf("SSL_CTX_load_verify_locations() returned 0, PEM file cert for verify not used on ip %s\n", Wrk->ServerInfo->Ip);
-#endif
+			DbgConsolePrintf("SSL_CTX_load_verify_locations() returned 0, PEM file cert for verify not used on ip %s\n", Wrk->ServerInfo->Ip);
 			IsVerifyCA = false;
 		}
 	} else {
@@ -555,16 +560,12 @@ static unsigned __stdcall WorkerProc(void* data) {
 		X509_STORE* Store = SSL_CTX_get_cert_store(ctx);
 		if (Store == NULL) {
 			IsVerifyCA = false;
-#ifdef DOH_CONSOLE_DBG
-			printf("SSL_CTX_get_cert_store() returned NULL, cert verify not used on ip %s\n", Wrk->ServerInfo->Ip);
-#endif
+			DbgConsolePrintf("SSL_CTX_get_cert_store() returned NULL, cert verify not used on ip %s\n", Wrk->ServerInfo->Ip);
 			OutputDebugString(TEXT("DOH_Windows: SSL SSL_CTX_get_cert_store() returned NULL, cert verify not used"));
 		} else {
 			if (!SetWindowsSSLStoreCerts(Store)) {
 				IsVerifyCA = false;
-#ifdef DOH_CONSOLE_DBG
-				printf("Cannot set local windows root certs, cert verify not used on ip %s\n", Wrk->ServerInfo->Ip);
-#endif
+				DbgConsolePrintf("Cannot set local windows root certs, cert verify not used on ip %s\n", Wrk->ServerInfo->Ip);
 				OutputDebugString(TEXT("DOH_Windows: SSL Cannot set local windows root certs, cert verify not used"));
 			}
 		}
@@ -620,9 +621,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 			HostString
 			);
 		OutputDebugStringA(Buf);
-#ifdef DOH_CONSOLE_DBG
-		printf("SSL cert verification is used on ip: %s, host: %s\n", Wrk->ServerInfo->Ip, HostString);
-#endif
+		DbgConsolePrintf("SSL cert verification is used on ip: %s, host: %s\n", Wrk->ServerInfo->Ip, HostString);
 	}
 
 	char SendBuffer[6000];
@@ -638,16 +637,13 @@ static unsigned __stdcall WorkerProc(void* data) {
 		Fds[1].revents = 0;
 		int PollRes = LqPollCheck(Fds, CountFds, WaitTime);
 		if (Fds[0].revents & LQ_POLLIN) { //If have input task event
-#ifdef DOH_CONSOLE_DBG
-			printf("Event recived %s\n", Wrk->ServerInfo->Ip);
-#endif
+			DbgConsolePrintf("Event recived %s\n", Wrk->ServerInfo->Ip);
+
 			LqEventReset(Fds[0].fd);
 			if ((Wrk->StartTsk != NULL) && (Socket == -1)) { //???? ???? ?????????? ? HTTPS ????????, ??????????
 				Socket = ConnConnectTCP(Wrk->ServerInfo->Ip, Wrk->ServerInfo->Port);
 				if (Socket == -1) {
-#ifdef DOH_CONSOLE_DBG
-					printf("Conn error %s\n", Wrk->ServerInfo->Ip);
-#endif
+					DbgConsolePrintf("Conn error %s\n", Wrk->ServerInfo->Ip);
 					goto lblPollHup;
 				}
 				ssl = SSL_new(ctx);
@@ -675,22 +671,20 @@ static unsigned __stdcall WorkerProc(void* data) {
 						snprintf(
 							Buf, 
 							sizeof(Buf), 
-							"DOH_Windows: SSL_get_verify_result() on host %s(ip %s) returned error num = %i, str = \"%s\"", 
+							"DOH_Windows: SSL_get_verify_result() on host %s(ip %s) returned error num=%i, str=\"%s\"", 
 							HostString,
 							Wrk->ServerInfo->Ip, 
 							(int)VerRes, 
 							VerErrStr
 						);
 						OutputDebugStringA(Buf);
-#ifdef DOH_CONSOLE_DBG
-						printf(
+						DbgConsolePrintf(
 							"SSL_get_verify_result() on host %s (ip %s) returned error num=%i, str=\"%s\"\n", 
 							HostString, 
 							Wrk->ServerInfo->Ip, 
 							(int)VerRes, 
 							VerErrStr
 						);
-#endif
 						goto lblPollHup;
 					}
 				}
@@ -700,9 +694,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 				Fds[1].fd = Socket;
 				Fds[1].events = LQ_POLLHUP;
 				CountFds = 2;
-#ifdef DOH_CONSOLE_DBG
-				printf("Conn created %s\n", Wrk->ServerInfo->Ip);
-#endif
+				DbgConsolePrintf("Conn created %s\n", Wrk->ServerInfo->Ip);
 			}
 			for (;;) {
 				Wrk->TskLoker.LockReadYield();
@@ -830,9 +822,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 				DnsReq* FisrtReq = Wrk->EndTsk;
 				Wrk->TskLoker.UnlockRead();
 				if (RetStatus == 200) {
-#ifdef DOH_CONSOLE_DBG
-					printf("Call sendto() send DNS pkt %s\n", Wrk->ServerInfo->Ip);
-#endif
+					DbgConsolePrintf("Call sendto() send DNS pkt %s\n", Wrk->ServerInfo->Ip);
 					sendto(UDPSocket, c, ContentLen, 0, (sockaddr*)&FisrtReq->From, FisrtReq->FromLen);
 				} else {
 					if (ContentLen == -1)
@@ -863,11 +853,9 @@ static unsigned __stdcall WorkerProc(void* data) {
 			}
 		}
 
-		if ((Fds[1].revents & LQ_POLLHUP) || ((WaitTime == DisconnectWaitTime) && (PollRes == 0)) || Wrk->IsEndWork) {
+		if ((Fds[1].revents & LQ_POLLHUP) || ((WaitTime == DisconnectWaitTime) && (PollRes == 0)) || Wrk->IsEndWork.load()) {
 		lblPollHup:;
-#ifdef DOH_CONSOLE_DBG
-			printf("Conn closed %s\n", Wrk->ServerInfo->Ip);
-#endif
+			DbgConsolePrintf("Conn closed %s\n", Wrk->ServerInfo->Ip);
 			if (ssl != NULL) {
 				SSL_shutdown(ssl);
 				SSL_free(ssl);
@@ -897,7 +885,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 			Wrk->EndTsk = NULL;
 			Wrk->TskLen = 0;
 			Wrk->TskLoker.UnlockWrite();
-			if (Wrk->IsEndWork)
+			if (Wrk->IsEndWork.load())
 				break;
 		}
 	}
@@ -908,16 +896,25 @@ static unsigned __stdcall WorkerProc(void* data) {
 	return 0;
 }
 
-VOID UpdateServiceStatus(DWORD currentState) {
+static VOID UpdateServiceStatus(DWORD currentState) {
+	serviceStatus.dwServiceType = SERVICE_WIN32_SHARE_PROCESS;
+	serviceStatus.dwServiceSpecificExitCode = 0;
+	serviceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP;
+	serviceStatus.dwWin32ExitCode = NO_ERROR;
+	serviceStatus.dwServiceSpecificExitCode = 0;
+	serviceStatus.dwCheckPoint = 0;
 	serviceStatus.dwCurrentState = currentState;
 	SetServiceStatus(serviceStatusHandle, &serviceStatus);
 }
 
 static unsigned __stdcall MainDOH(void* data) {
 	OutputDebugString(TEXT("DOH_Windows: Start DOH_Main()"));
-	StopServiceEvent = LqEventCreate(1);
+
+	Workers = NULL;
+	IsStopService = false;
 
 	char HostsListInputReq[4096];
+
 
 	int ConfigFileSize;
 	char ConfigFile2[] =
@@ -933,7 +930,13 @@ static unsigned __stdcall MainDOH(void* data) {
 	ConfigFileSize = sizeof(ConfigFile2);
 
 	OutputDebugString(TEXT("DOH_Windows: DOH_Main() open doh.txt"));
-	FILE* OpenedConfigFile = fopen("C:\\Windows\\System32\\drivers\\etc\\doh.txt", "rb");
+
+	FILE* OpenedConfigFile;
+	{
+		char Buf[300];
+		ExpandEnvironmentStringsA("%SystemRoot%\\System32\\drivers\\etc\\doh.txt", Buf, sizeof(Buf) - 3);
+		OpenedConfigFile = fopen(Buf, "rb");
+	}
 	if (OpenedConfigFile != NULL) {
 		fseek(OpenedConfigFile, 0, SEEK_END);
 		ConfigFileSize = ftell(OpenedConfigFile);
@@ -943,6 +946,8 @@ static unsigned __stdcall MainDOH(void* data) {
 		fclose(OpenedConfigFile);
 		ConfigFile[ConfigFileSize] = '\0';
 		OutputDebugString(TEXT("DOH_Windows: DOH_Main() doh.txt readed"));
+	} else {
+		OutputDebugString(TEXT("DOH_Windows: DOH_Main() doh.txt not readed"));
 	}
 
 	ParseConfigFile(ConfigFileSize, ConfigFile);
@@ -972,7 +977,7 @@ static unsigned __stdcall MainDOH(void* data) {
 		Workers[i] = Wrk;
 		Wrk->CurTsk = Wrk->EndTsk = Wrk->StartTsk = NULL;
 		Wrk->TskLen = 0;
-		Wrk->IsEndWork = false;
+		Wrk->IsEndWork.store(false);
 		Wrk->Event = LqEventCreate(1);
 		Wrk->ServerInfo = &(ServersInfo[i % CountServers]);
 		uintptr_t Handler = _beginthreadex(NULL, 0, WorkerProc, Wrk, 0, &Wrk->ThreadId);
@@ -990,12 +995,12 @@ static unsigned __stdcall MainDOH(void* data) {
 #ifdef DOH_CONSOLE_DBG
 		if (res <= 0) {
 			int RecvfromErr = WSAGetLastError(); //WSAECONNRESET
-			printf("recvfrom() return -1, error code: %i\n", RecvfromErr);
+			DbgConsolePrintf("recvfrom() return -1, error code: %i\n", RecvfromErr);
 		} else {
-			printf("Recived DNS pkt\n");
+			DbgConsolePrintf("Recived DNS pkt\n");
 		}
 #endif
-		if (LqPollCheckSingle(StopServiceEvent, LQ_POLLIN, 1) & LQ_POLLIN) {
+		if (IsStopService.load()) {
 			OutputDebugString(TEXT("DOH_Windows: MainDOH() recive stop event"));
 			LqFastAlloc::Delete(Req);
 			break;
@@ -1084,9 +1089,7 @@ static unsigned __stdcall MainDOH(void* data) {
 		Workers[TargetWrk]->TskLoker.UnlockWrite();
 
 		LqEventSet(Workers[TargetWrk]->Event);
-#ifdef DOH_CONSOLE_DBG
-		printf("Send job to worker(set event)\n");
-#endif
+		DbgConsolePrintf("Send job to worker(set event)\n");
 	}
 lblOut:
 
@@ -1094,7 +1097,7 @@ lblOut:
 
 	if (Workers != NULL) {
 		for (int i = 0; i < CountWorkers; i++) {
-			Workers[i]->IsEndWork = true;
+			Workers[i]->IsEndWork.store(true);
 			LqEventSet(Workers[i]->Event);
 			WaitForSingleObject(Workers[i]->ThreadHandle, INFINITE);
 			CloseHandle(Workers[i]->ThreadHandle);
@@ -1134,8 +1137,6 @@ lblOut:
 			free(RspHosts[i].Name);
 		free(RspHosts);
 	}
-	if(StopServiceEvent != -1)
-		LqFileClose(StopServiceEvent);
 
 	UpdateServiceStatus(SERVICE_STOPPED);
 	OutputDebugString(TEXT("DOH_Windows: Service return from MainDOH()"));
@@ -1143,19 +1144,19 @@ lblOut:
 }
 
 
-DWORD WINAPI ServiceHandler(DWORD dwControl) {
+static DWORD WINAPI ServiceHandler(DWORD dwControl) {
 	switch (dwControl) {
 	case SERVICE_CONTROL_STOP:
 		OutputDebugString(TEXT("DOH_Windows: Runing ServiceHandler(SERVICE_CONTROL_STOP)"));
 		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
-		LqEventSet(StopServiceEvent);
+		IsStopService.store(true);
 		if(UDPSocket != -1)
 			closesocket(UDPSocket);
 		break;
 	case SERVICE_CONTROL_SHUTDOWN:
 		OutputDebugString(TEXT("DOH_Windows: Runing ServiceHandler(SERVICE_CONTROL_SHUTDOWN)"));
 		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
-		LqEventSet(StopServiceEvent);
+		IsStopService.store(true);
 		if(UDPSocket != -1)
 			closesocket(UDPSocket);
 		break;
@@ -1193,14 +1194,7 @@ extern "C" __declspec(dllexport) VOID WINAPI ServiceMain(DWORD argc, LPTSTR argv
 
 	serviceStatusHandle = RegisterServiceCtrlHandlerW(SVCNAME, (LPHANDLER_FUNCTION)ServiceHandler);
 
-	serviceStatus.dwServiceType = SERVICE_WIN32_SHARE_PROCESS;
-	serviceStatus.dwServiceSpecificExitCode = 0;
-	serviceStatus.dwControlsAccepted = SERVICE_ACCEPT_STOP;
-	serviceStatus.dwWin32ExitCode = NO_ERROR;
-	serviceStatus.dwServiceSpecificExitCode = 0;
-	serviceStatus.dwCheckPoint = 0;
 	UpdateServiceStatus(SERVICE_START_PENDING);
-
 	//unsigned int ThreadId = 0;
 	//_beginthreadex(NULL, 0, MainDOH, NULL, 0, &ThreadId);
 	MainDOH(NULL);
