@@ -1030,7 +1030,7 @@ static unsigned __stdcall MainDOH(void* data) {
 		if (CountRspHosts > 0) { //If have hosts list, then enum all elements in host list and match patterns
 			int CountQuer = GetDomainsNamesFromDNSPkt(Req->Buf, Req->BufLen, HostsListInputReq, sizeof(HostsListInputReq));
 			if (CountQuer > 0) {
-				DbgConsolePrintf("Recived DNS pkt with domen name \"%s\"\n", HostsListInputReq);
+				DbgConsolePrintf("Received DNS pkt with domen name \"%s\"\n", HostsListInputReq);
 				char* c = HostsListInputReq;
 				for (int i = 0; i < CountQuer; i++) {
 					char* t = c;
