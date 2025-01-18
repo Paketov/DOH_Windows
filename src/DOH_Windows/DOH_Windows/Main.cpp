@@ -825,6 +825,18 @@ static unsigned __stdcall WorkerProc(void* data) {
 					DbgConsolePrintf("Call sendto() send DNS pkt %s\n", Wrk->ServerInfo->Ip);
 					sendto(UDPSocket, c, ContentLen, 0, (sockaddr*)&FisrtReq->From, FisrtReq->FromLen);
 				} else {
+					char Buf[500];
+					snprintf(
+						Buf,
+						sizeof(Buf) - 2,
+						"DOH_Windows: Dns server host %s (ip %s) returned %i status",
+						HostString,
+						Wrk->ServerInfo->Ip,
+						(int)RetStatus
+						);
+					OutputDebugStringA(Buf);
+					DbgConsolePrintf("%s\n", Buf);
+
 					if (ContentLen == -1)
 						ContentLen = 0;
 				}
@@ -1018,6 +1030,7 @@ static unsigned __stdcall MainDOH(void* data) {
 		if (CountRspHosts > 0) { //If have hosts list, then enum all elements in host list and match patterns
 			int CountQuer = GetDomainsNamesFromDNSPkt(Req->Buf, Req->BufLen, HostsListInputReq, sizeof(HostsListInputReq));
 			if (CountQuer > 0) {
+				DbgConsolePrintf("Resived DNS pkt with domen name \"%s\"\n", HostsListInputReq);
 				char* c = HostsListInputReq;
 				for (int i = 0; i < CountQuer; i++) {
 					char* t = c;
