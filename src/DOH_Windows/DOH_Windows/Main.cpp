@@ -554,6 +554,9 @@ static bool SetWindowsSSLStoreCerts(X509_STORE* X509_store) {
 	return true;
 }
 
+static const uint32_t HTTPEndHeaders = *((uint32_t*)"\r\n\r\n");
+static const uint16_t HTTPEndHeader = *((uint16_t*)"\r\n");
+
 static unsigned __stdcall WorkerProc(void* data) {
 	Worker* Wrk = (Worker*)data;
 
@@ -594,10 +597,9 @@ static unsigned __stdcall WorkerProc(void* data) {
 	int SendBufferPos = 0;
 	int ReciveBufferPos = 0;
 
-	static const uint32_t HTTPEndHeaders = *((uint32_t*)"\r\n\r\n");
-	static const uint16_t HTTPEndHeader = *((uint16_t*)"\r\n");
 
-	int ContentLen = -1;
+
+	int ContentLen = 0;
 	int RetStatus = -1;
 	bool IsHaveEndHeaders = false;
 	char* c, *m;
@@ -750,7 +752,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 			}
 		}
 		if ((CountFds > 1) && (Fds[1].revents & LQ_POLLIN)) { //If have data in socket
-			int Readed = SSL_read(ssl, ReciveBuffer, ReciveBufferSize - ReciveBufferPos);
+			int Readed = SSL_read(ssl, ReciveBuffer + ReciveBufferPos, ReciveBufferSize - ReciveBufferPos - 3);
 			if (Readed <= 0) {
 				switch (SSL_get_error(ssl, Readed)) {
 				case SSL_ERROR_NONE: break;
@@ -762,7 +764,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 			}
 			ReciveBufferPos += Readed;
 		lblContinue2:;
-			ContentLen = -1;
+			ContentLen = 0;
 			RetStatus = -1;
 			IsHaveEndHeaders = false;
 
@@ -792,7 +794,12 @@ static unsigned __stdcall WorkerProc(void* data) {
 							}
 						}
 					}
-					goto lblPollHup;/* Is not have content-length header */
+					/* Is not have content-length header */
+					if (RetStatus == 200){
+						goto lblPollHup;
+					} else {
+						goto lblContinue3;/* If ret status is not a 200 then print error */
+					}
 				}
 			}
 		lblContinue3:;
@@ -820,9 +827,6 @@ static unsigned __stdcall WorkerProc(void* data) {
 						);
 					OutputDebugStringA(Buf);
 					DbgConsolePrintf("%s\n", Buf);
-
-					if (ContentLen < 0)
-						ContentLen = 0;
 				}
 				Wrk->TskLoker.LockWriteYield();
 				FisrtReq = Wrk->EndTsk;

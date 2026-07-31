@@ -3,7 +3,7 @@ CountWorkers:
 DisconnectWaitTime:
  20000
 LocalAddress:
- 0.0.0.0 53
+ 127.0.0.1 53
 DOHServers:
  8.8.8.8 443 https://dns.google/dns-query
  8.8.4.4 443 https://dns.google/dns-query
@@ -15,5 +15,7 @@ HostsMatch:
   ?*.wns.windows.com$
   ?*windowsupdate.com$
   ?*checkappexec.microsoft.com$
+  ?*vortex.data.microsoft.com$
+  ?*win8.ipv6.microsoft.com$
   ^push.services.mozilla.com$
 
