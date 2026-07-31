@@ -120,6 +120,8 @@ typedef struct Worker {
 	unsigned ThreadId;
 	HANDLE ThreadHandle;
 	HttpsServerInfo* ServerInfo;
+	SSL_CTX* ssl_ctx;
+	bool IsVerifyCA;
 	volatile std::atomic<bool> IsEndWork;
 } Worker;
 
@@ -265,7 +267,7 @@ SERVICE_STATUS_HANDLE serviceStatusHandle;
 #define SVCNAME L"DOH_Windows"
 
 
-static void ParseConfigFile(int ConfigFileSize, char* ConfigFile) {
+static int ParseConfigFile(char* ConfigFile, int ConfigFileSize) {
 	//Parse config file
 	typedef enum CUR_READ_STATE {
 		CUR_STATE_DEFAULT,
@@ -283,6 +285,16 @@ static void ParseConfigFile(int ConfigFileSize, char* ConfigFile) {
 	LocalAddress = LocalAddress2;
 	LocalPort = LocalPort2;
 	SSL_CACertFileForVerify = NULL;
+
+	for (char* c = ConfigFile, *m = c + ConfigFileSize; c < m; c++) {
+		if (*c == '#') {
+			char* s = c;
+			for (; (c < m) && ((*c != '\r') && (*c != '\n')); c++);
+			memmove(s, c, m - c);
+			ConfigFileSize -= (c - s);
+			m = c + ConfigFileSize;
+		}
+	}
 
 
 	for (char* c = ConfigFile, *m = c + ConfigFileSize; (c < m) && (*c != '\0'); ) {
@@ -428,6 +440,7 @@ lblIpIsEmpty:
 			}break;
 		}
 	}
+	return ConfigFileSize;
 }
 
 
@@ -544,34 +557,8 @@ static bool SetWindowsSSLStoreCerts(X509_STORE* X509_store) {
 static unsigned __stdcall WorkerProc(void* data) {
 	Worker* Wrk = (Worker*)data;
 
+	SSL* ssl;
 	int Socket = -1;
-	SSL_CTX* ctx = SSL_CTX_new(SSLv23_client_method());
-	SSL* ssl = NULL;
-	bool IsVerifyCA = true;
-	SSL_CTX_set_default_verify_paths(ctx);
-	if (SSL_CACertFileForVerify != NULL) {
-		if (SSL_CTX_load_verify_locations(ctx, SSL_CACertFileForVerify, NULL) != 1) {
-			OutputDebugString(TEXT("DOH_Windows: SSL SSL_CTX_load_verify_locations() returned 0, PEM file cert for verify not used"));
-			DbgConsolePrintf("SSL_CTX_load_verify_locations() returned 0, PEM file cert for verify not used on ip %s\n", Wrk->ServerInfo->Ip);
-			IsVerifyCA = false;
-		}
-	} else {
-		//Used for not get X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY error from SSL_get_verify_result()
-		X509_STORE* Store = SSL_CTX_get_cert_store(ctx);
-		if (Store == NULL) {
-			IsVerifyCA = false;
-			DbgConsolePrintf("SSL_CTX_get_cert_store() returned NULL, cert verify not used on ip %s\n", Wrk->ServerInfo->Ip);
-			OutputDebugString(TEXT("DOH_Windows: SSL SSL_CTX_get_cert_store() returned NULL, cert verify not used"));
-		} else {
-			if (!SetWindowsSSLStoreCerts(Store)) {
-				IsVerifyCA = false;
-				DbgConsolePrintf("Cannot set local windows root certs, cert verify not used on ip %s\n", Wrk->ServerInfo->Ip);
-				OutputDebugString(TEXT("DOH_Windows: SSL Cannot set local windows root certs, cert verify not used"));
-			}
-		}
-	}
-
-
 	LqTimeMillisec WaitTime = INFINITE;
 	int CountFds = 1;
 	LqPoll Fds[2];
@@ -594,6 +581,27 @@ static unsigned __stdcall WorkerProc(void* data) {
 	char* FragmentStart; char* FragmentEnd;
 	char* End; char TypeHost;
 
+
+
+	const int SendBufferSize = 8192;
+	const int ReciveBufferSize = 8192; 
+	const int Base64BufSize = 8192;
+
+	char* SendBuffer = (char*)malloc(SendBufferSize);
+	char* ReciveBuffer = (char*)malloc(ReciveBufferSize);
+	char* Base64Buf = (char*)malloc(Base64BufSize);
+
+	int SendBufferPos = 0;
+	int ReciveBufferPos = 0;
+
+	static const uint32_t HTTPEndHeaders = *((uint32_t*)"\r\n\r\n");
+	static const uint16_t HTTPEndHeader = *((uint16_t*)"\r\n");
+
+	int ContentLen = -1;
+	int RetStatus = -1;
+	bool IsHaveEndHeaders = false;
+	char* c, *m;
+
 	LqHttpPrsUrl(QueryString,
 		&SchemeStart, &SchemeEnd,
 		&UserInfoStart, &UserInfoEnd,
@@ -610,27 +618,8 @@ static unsigned __stdcall WorkerProc(void* data) {
 	strncpy(PathString, DirStart, End - DirStart);
 	PathString[End - DirStart] = '\0';
 
-	if (IsVerifyCA) {
-		char Buf[500];
-		//SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
-		snprintf(
-			Buf,
-			sizeof(Buf),
-			"DOH_Windows: SSL cert verification is used on ip: %s, host: %s",
-			Wrk->ServerInfo->Ip, 
-			HostString
-			);
-		OutputDebugStringA(Buf);
-		DbgConsolePrintf("SSL cert verification is used on ip: %s, host: %s\n", Wrk->ServerInfo->Ip, HostString);
-	}
-
-	char SendBuffer[6000];
-	char* SendBufferFilledPos = SendBuffer;
-	char* SendBufferFilledPosEnd = SendBuffer;
-	char Base64Buf[1024];
-
-	char ReciveBuffer[6000];
-	char* ReciveBufferFilledPosEnd = ReciveBuffer;
+	const int HostStringLen = strlen(HostString);
+	const int PathStringLen = strlen(PathString);
 
 	for (;;) {
 
@@ -646,13 +635,13 @@ static unsigned __stdcall WorkerProc(void* data) {
 					DbgConsolePrintf("Conn error %s\n", Wrk->ServerInfo->Ip);
 					goto lblPollHup;
 				}
-				ssl = SSL_new(ctx);
+				ssl = SSL_new(Wrk->ssl_ctx);
 
 				if (SSL_set_fd(ssl, Socket) == 0) {
 					goto lblPollHup;
 				}
 
-				if (IsVerifyCA) {
+				if (Wrk->IsVerifyCA) {
 					SSL_set_hostflags(ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
 					if (!SSL_set1_host(ssl, HostString)) {
 						goto lblPollHup;
@@ -663,7 +652,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 					goto lblPollHup;
 				}
 
-				if (IsVerifyCA) {
+				if (Wrk->IsVerifyCA) {
 					long VerRes = SSL_get_verify_result(ssl);
 					if (VerRes != X509_V_OK) {//X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY
 						char Buf[500];
@@ -693,6 +682,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 				WaitTime = DisconnectWaitTime;
 				Fds[1].fd = Socket;
 				Fds[1].events = LQ_POLLHUP;
+				Fds[1].revents = 0;
 				CountFds = 2;
 				DbgConsolePrintf("Conn created %s\n", Wrk->ServerInfo->Ip);
 			}
@@ -705,19 +695,14 @@ static unsigned __stdcall WorkerProc(void* data) {
 					break;
 				}
 
-				int Base64Len = LqDataToBase64(true, false, CurTsk->Buf, CurTsk->BufLen, Base64Buf, sizeof(Base64Buf) - 3);
-				if ((SendBufferFilledPosEnd + (Base64Len + 256)) > (SendBuffer + sizeof(SendBuffer))) {
-					int FilledSize = SendBufferFilledPosEnd - SendBufferFilledPos;
-					memmove(SendBuffer, SendBufferFilledPos, FilledSize);
-					SendBufferFilledPosEnd = SendBuffer + FilledSize;
-					SendBufferFilledPos = SendBuffer;
-				}
-				if ((SendBufferFilledPosEnd + (Base64Len + 256)) > (SendBuffer + sizeof(SendBuffer))) { //If queue very hight
+				int Base64Len = LqDataToBase64(true, false, CurTsk->Buf, CurTsk->BufLen, Base64Buf, Base64BufSize - 3);
+				if ((SendBufferPos + (Base64Len + 256 + HostStringLen + PathStringLen)) > SendBufferSize) { //If queue very hight
 					goto Continue4;
 				}
+
 				int WrittenInBuf = snprintf(
-					SendBufferFilledPosEnd,
-					sizeof(SendBuffer) - (SendBufferFilledPosEnd - SendBuffer),
+					SendBuffer + SendBufferPos,
+					SendBufferSize - SendBufferPos,
 					"GET %s?dns=%s HTTP/1.1\r\n"
 					"Host: %s\r\n"
 					"Accept: application/dns-udpwireformat\r\n"
@@ -729,7 +714,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 					);
 				Fds[1].events |= LQ_POLLOUT;
 				Fds[1].revents |= LQ_POLLOUT;
-				SendBufferFilledPosEnd += WrittenInBuf;
+				SendBufferPos += WrittenInBuf;
 
 				Wrk->TskLoker.LockWriteYield();
 				Wrk->CurTsk = Wrk->CurTsk->PrevTsk;
@@ -739,11 +724,10 @@ static unsigned __stdcall WorkerProc(void* data) {
 
 		Continue4:;
 		}
-		if ((CountFds > 1) && ((Fds[1].revents & LQ_POLLOUT) || ((SendBufferFilledPosEnd - SendBufferFilledPos) > 0))) { //Is need send data via socket
-			int FilledSize = SendBufferFilledPosEnd - SendBufferFilledPos;
+		if ((CountFds > 1) && ((Fds[1].revents & LQ_POLLOUT) || (SendBufferPos > 0))) { //Is need send data via socket
 
-			if (FilledSize > 0) {
-				int Written = SSL_write(ssl, SendBufferFilledPos, FilledSize);
+			if (SendBufferPos > 0) {
+				int Written = SSL_write(ssl, SendBuffer, SendBufferPos);
 				if (Written <= 0) {
 					switch (SSL_get_error(ssl, Written)) {
 					case SSL_ERROR_NONE: break;
@@ -753,12 +737,12 @@ static unsigned __stdcall WorkerProc(void* data) {
 					default: goto lblContinue1;
 					}
 				}
-				SendBufferFilledPos += Written;
-				FilledSize = SendBufferFilledPosEnd - SendBufferFilledPos;
+				SendBufferPos -= Written;
+				memmove(SendBuffer, SendBuffer + Written, SendBufferPos);
 				Fds[1].events |= LQ_POLLIN;
 			}
 		lblContinue1:;
-			if (FilledSize <= 0) {
+			if (SendBufferPos <= 0) {
 				Fds[1].events &= ~LQ_POLLOUT;
 				WaitTime = DisconnectWaitTime;
 			} else {
@@ -766,8 +750,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 			}
 		}
 		if ((CountFds > 1) && (Fds[1].revents & LQ_POLLIN)) { //If have data in socket
-			int FilledSize = ReciveBufferFilledPosEnd - ReciveBuffer;
-			int Readed = SSL_read(ssl, ReciveBufferFilledPosEnd, sizeof(ReciveBuffer) - FilledSize);
+			int Readed = SSL_read(ssl, ReciveBuffer, ReciveBufferSize - ReciveBufferPos);
 			if (Readed <= 0) {
 				switch (SSL_get_error(ssl, Readed)) {
 				case SSL_ERROR_NONE: break;
@@ -777,15 +760,14 @@ static unsigned __stdcall WorkerProc(void* data) {
 				default: goto lblContinue2;
 				}
 			}
-			ReciveBufferFilledPosEnd += Readed;
+			ReciveBufferPos += Readed;
 		lblContinue2:;
-			int ContentLen = -1;
-			int RetStatus = -1;
-			bool IsHaveEndHeaders = false;
-			char* c;
+			ContentLen = -1;
+			RetStatus = -1;
+			IsHaveEndHeaders = false;
 
-			for (c = ReciveBuffer; c < (ReciveBufferFilledPosEnd - 4); c++) {
-				if ((c[0] == '\r') && (c[1] == '\n') && (c[2] == '\r') && (c[3] == '\n')) { //If have all headers
+			for (c = ReciveBuffer, m = ReciveBuffer + ReciveBufferPos - 4; c <= m; c++) {
+				if (*((uint32_t*)c) == HTTPEndHeaders) { //If have all headers
 					IsHaveEndHeaders = true;
 					{
 						char *k = ReciveBuffer;
@@ -795,24 +777,26 @@ static unsigned __stdcall WorkerProc(void* data) {
 						RetStatus = atoi(k);
 					}
 					for (char* u = ReciveBuffer; u < c; u++) {
-						if ((u[0] == '\r') && (u[1] == '\n')) {
+						if (*((uint16_t*)u) == HTTPEndHeader) {
 							u += 2;
 							for (; (u < c) && ((*u == ' ') || (*u == '\t')); u++);
+
 							if (strnicmp(u, "content-length", sizeof("content-length") - 1) == 0) {
 								u += (sizeof("content-length") - 1);
 								for (; (u < c) && ((*u == '\t') || (*u == ' ') || (*u == ':')); u++);
 								ContentLen = atoi(u);
-								if ((ContentLen <= 0) || (ContentLen > (((int)sizeof(ReciveBuffer)) - ((c + 20) - ReciveBuffer))))
+								if ((ContentLen <= 0) || (ContentLen > (ReciveBufferSize - ((c + 20) - ReciveBuffer))))/* Is not have place for responce*/
 									goto lblPollHup;
 
 								goto lblContinue3;
 							}
 						}
 					}
+					goto lblPollHup;/* Is not have content-length header */
 				}
 			}
 		lblContinue3:;
-			if (IsHaveEndHeaders && (((c + 4) + ContentLen) <= ReciveBufferFilledPosEnd)) {
+			if (IsHaveEndHeaders && ((((c - ReciveBuffer) + 4) + ContentLen) <= ReciveBufferPos)) {
 				if (ContentLen < 0) {
 					goto lblPollHup;
 				}
@@ -822,7 +806,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 				DnsReq* FisrtReq = Wrk->EndTsk;
 				Wrk->TskLoker.UnlockRead();
 				if (RetStatus == 200) {
-					DbgConsolePrintf("Call sendto() send DNS pkt %s\n", Wrk->ServerInfo->Ip);
+					DbgConsolePrintf("Call sendto() send DNS pkt from %s\n", Wrk->ServerInfo->Ip);
 					sendto(UDPSocket, c, ContentLen, 0, (sockaddr*)&FisrtReq->From, FisrtReq->FromLen);
 				} else {
 					char Buf[500];
@@ -837,7 +821,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 					OutputDebugStringA(Buf);
 					DbgConsolePrintf("%s\n", Buf);
 
-					if (ContentLen == -1)
+					if (ContentLen < 0)
 						ContentLen = 0;
 				}
 				Wrk->TskLoker.LockWriteYield();
@@ -856,11 +840,10 @@ static unsigned __stdcall WorkerProc(void* data) {
 
 				LqFastAlloc::Delete(FisrtReq);
 
+				ReciveBufferPos -= ((c - ReciveBuffer) + ContentLen);
+				memmove(ReciveBuffer, c + ContentLen, ReciveBufferPos);
 
-				memmove(ReciveBuffer, c + ContentLen, ReciveBufferFilledPosEnd - (c + ContentLen));
-				ReciveBufferFilledPosEnd -= ((c + ContentLen) - ReciveBuffer);
-
-				if (ReciveBufferFilledPosEnd > ReciveBuffer)
+				if (ReciveBufferPos > 0)
 					goto lblContinue2;
 			}
 		}
@@ -882,9 +865,8 @@ static unsigned __stdcall WorkerProc(void* data) {
 
 			Fds[1].events = 0;
 
-			SendBufferFilledPos = SendBuffer;
-			SendBufferFilledPosEnd = SendBuffer;
-			ReciveBufferFilledPosEnd = ReciveBuffer;
+			SendBufferPos = 0;
+			ReciveBufferPos = 0;
 
 			Wrk->TskLoker.LockWriteYield();
 			//LqEventReset(Fds[0].fd);
@@ -901,10 +883,13 @@ static unsigned __stdcall WorkerProc(void* data) {
 				break;
 		}
 	}
-	SSL_CTX_free(ctx);
 	free(QueryString);
 	free(HostString);
 	free(PathString);
+
+	free(SendBuffer);
+	free(ReciveBuffer);
+	free(Base64Buf);
 	return 0;
 }
 
@@ -924,7 +909,7 @@ static unsigned __stdcall MainDOH(void* data) {
 
 	Workers = NULL;
 	IsStopService = false;
-
+	
 	char HostsListInputReq[4096];
 
 
@@ -942,6 +927,7 @@ static unsigned __stdcall MainDOH(void* data) {
 	ConfigFileSize = sizeof(ConfigFile2);
 
 	OutputDebugString(TEXT("DOH_Windows: DOH_Main() open doh.txt"));
+	srand(time(NULL));
 
 	FILE* OpenedConfigFile;
 	{
@@ -962,10 +948,49 @@ static unsigned __stdcall MainDOH(void* data) {
 		OutputDebugString(TEXT("DOH_Windows: DOH_Main() doh.txt not readed"));
 	}
 
-	ParseConfigFile(ConfigFileSize, ConfigFile);
+	ConfigFileSize = ParseConfigFile(ConfigFile, ConfigFileSize);
+
 	OutputDebugString(TEXT("DOH_Windows: ParseConfigFile() executed"));
 	SSL_load_error_strings();
 	SSL_library_init();
+
+	SSL_CTX* ctx = SSL_CTX_new(SSLv23_client_method());
+	bool IsVerifyCA = true;
+	SSL_CTX_set_default_verify_paths(ctx);
+	if (SSL_CACertFileForVerify != NULL) {
+		if (SSL_CTX_load_verify_locations(ctx, SSL_CACertFileForVerify, NULL) != 1) {
+			OutputDebugString(TEXT("DOH_Windows: SSL SSL_CTX_load_verify_locations() returned 0, PEM file cert for verify not used"));
+			DbgConsolePrintf("SSL_CTX_load_verify_locations() returned 0, PEM file cert for verify not used\n");
+			IsVerifyCA = false;
+		}
+	} else {
+		//Used for not get X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY error from SSL_get_verify_result()
+		X509_STORE* Store = SSL_CTX_get_cert_store(ctx);
+		if (Store == NULL) {
+			IsVerifyCA = false;
+			DbgConsolePrintf("SSL_CTX_get_cert_store() returned NULL, cert verify not used\n");
+			OutputDebugString(TEXT("DOH_Windows: SSL SSL_CTX_get_cert_store() returned NULL, cert verify not used"));
+		} else {
+			if (!SetWindowsSSLStoreCerts(Store)) {
+				IsVerifyCA = false;
+				DbgConsolePrintf("Cannot set local windows root certs, cert verify not used\n");
+				OutputDebugString(TEXT("DOH_Windows: SSL Cannot set local windows root certs, cert verify not used"));
+			}
+		}
+	}
+
+	if (IsVerifyCA) {
+		char Buf[500];
+		//SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
+		snprintf(
+			Buf,
+			sizeof(Buf),
+			"DOH_Windows: SSL cert verification is used"
+			);
+		OutputDebugStringA(Buf);
+		DbgConsolePrintf("SSL cert verification is used");
+	}
+
 
 	OutputDebugString(TEXT("DOH_Windows: SSL_library_init() executed"));
 	UDPSocket = ConnBindUDP(LocalAddress, LocalPort, 1024);
@@ -981,6 +1006,7 @@ static unsigned __stdcall MainDOH(void* data) {
 		closesocket(UDPSocket);
 		goto lblOut;
 	}
+
 	Workers = (Worker**)malloc(sizeof(*Workers) * CountWorkers);
 
 	for (int i = 0; i < CountWorkers; i++) {
@@ -992,6 +1018,8 @@ static unsigned __stdcall MainDOH(void* data) {
 		Wrk->IsEndWork.store(false);
 		Wrk->Event = LqEventCreate(1);
 		Wrk->ServerInfo = &(ServersInfo[i % CountServers]);
+		Wrk->IsVerifyCA = IsVerifyCA;
+		Wrk->ssl_ctx = ctx;
 		uintptr_t Handler = _beginthreadex(NULL, 0, WorkerProc, Wrk, 0, &Wrk->ThreadId);
 		Wrk->ThreadHandle = (HANDLE)Handler;
 	}
@@ -1081,6 +1109,10 @@ static unsigned __stdcall MainDOH(void* data) {
 			if (Workers[i]->TskLen < MinTskLen) {
 				MinTskLen = Workers[i]->TskLen;
 				TargetWrk = i;
+			} else if (Workers[i]->TskLen == MinTskLen) {
+				if (rand() & 1) {
+					TargetWrk = i;
+				}
 			}
 		}
 		Workers[TargetWrk]->TskLoker.LockWriteYield();
@@ -1156,6 +1188,10 @@ lblOut:
 		for (int i = 0; i < CountRspHosts; i++)
 			free(RspHosts[i].Name);
 		free(RspHosts);
+	}
+
+	if (ctx != NULL) {
+		SSL_CTX_free(ctx);
 	}
 
 	UpdateServiceStatus(SERVICE_STOPPED);
