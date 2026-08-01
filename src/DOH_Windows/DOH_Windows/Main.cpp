@@ -92,6 +92,7 @@ typedef struct HttpsServerInfo {
 	char* Query;
 	char* Ip;
 	char* Port;
+	bool IsDNSOverTLS;
 }HttpsServerInfo;
 
 typedef union ConnAddr {
@@ -106,8 +107,8 @@ typedef struct DnsReq {
 	DnsReq* PrevTsk;
 	ConnAddr From;
 	int FromLen;
-	uint8_t Buf[REQ_PKT_SIZE];
 	int BufLen;
+	uint8_t Buf[REQ_PKT_SIZE];
 }DnsReq;
 
 typedef struct Worker {
@@ -292,7 +293,9 @@ static int ParseConfigFile(char* ConfigFile, int ConfigFileSize) {
 			for (; (c < m) && ((*c != '\r') && (*c != '\n')); c++);
 			memmove(s, c, m - c);
 			ConfigFileSize -= (c - s);
-			m = c + ConfigFileSize;
+			m = ConfigFile + ConfigFileSize;
+			*m = '\0';
+			c = s - 1;
 		}
 	}
 
@@ -372,10 +375,24 @@ static int ParseConfigFile(char* ConfigFile, int ConfigFileSize) {
 				LocalPort[EndPort - StartPort] = '\0';
 			}break;
 			case CUR_STATE_DOH_SERV: {
+				int IsDNSOverTLS = -1;
+
 				for (; (c < m) && ((*c == ' ') || (*c == '\t')); c++);
 				char* StartIpAddress = c;
 				for (; (c < m) && (*c != ' ') && (*c != '\t'); c++);
 				char* EndIpAddress = c;
+
+				if (!strnicmp(StartIpAddress, "dot", sizeof("dot") - 1))
+					IsDNSOverTLS = 1;
+				if (!strnicmp(StartIpAddress, "doh", sizeof("doh") - 1))
+					IsDNSOverTLS = 0;
+
+				if (IsDNSOverTLS != -1) {
+					for (; (c < m) && ((*c == ' ') || (*c == '\t')); c++);
+					StartIpAddress = c;
+					for (; (c < m) && (*c != ' ') && (*c != '\t'); c++);
+					EndIpAddress = c;
+				}
 
 				for (; (c < m) && ((*c == ' ') || (*c == '\t')); c++);
 				char* StartPort = c;
@@ -384,7 +401,7 @@ static int ParseConfigFile(char* ConfigFile, int ConfigFileSize) {
 
 				for (; (c < m) && ((*c == ' ') || (*c == '\t')); c++);
 				char* StartQuery = c;
-				for (; (c < m) && (*c != '\r') && (*c != '\n'); c++);
+				for (; (c < m) && (*c != '\r') && (*c != '\n') && (*c != ' ') && (*c != '\t'); c++);
 				char* EndQuery = c;
 
 				CountServers++;
@@ -402,6 +419,9 @@ static int ParseConfigFile(char* ConfigFile, int ConfigFileSize) {
 				ServersInfo[CountServers - 1].Query = (char*)malloc((EndQuery - StartQuery) + 2);
 				strncpy(ServersInfo[CountServers - 1].Query, StartQuery, EndQuery - StartQuery);
 				ServersInfo[CountServers - 1].Query[EndQuery - StartQuery] = '\0';
+
+				//!!!!!!!!!!!!!!!!!!!!
+				ServersInfo[CountServers - 1].IsDNSOverTLS = IsDNSOverTLS == 1;
 			}break;
 			case CUR_STATE_HOSTS: {
 				for (; (c < m) && ((*c == ' ') || (*c == '\t')); c++);
@@ -597,34 +617,43 @@ static unsigned __stdcall WorkerProc(void* data) {
 	int SendBufferPos = 0;
 	int ReciveBufferPos = 0;
 
-
-
 	int ContentLen = 0;
 	int RetStatus = -1;
 	bool IsHaveEndHeaders = false;
 	char* c, *m;
 
-	LqHttpPrsUrl(QueryString,
-		&SchemeStart, &SchemeEnd,
-		&UserInfoStart, &UserInfoEnd,
-		&HostStart, &HostEnd,
-		&PortStart, &PortEnd,
-		&DirStart, &DirEnd,
-		&QueryStart, &QueryEnd,
-		&FragmentStart, &FragmentEnd,
-		&End, &TypeHost,
-		NULL, NULL
-		);
-	strncpy(HostString, HostStart, HostEnd - HostStart);
-	HostString[HostEnd - HostStart] = '\0';
-	strncpy(PathString, DirStart, End - DirStart);
-	PathString[End - DirStart] = '\0';
+	if (strstr(QueryString, "/") == 0) {
+		strcpy(HostString, QueryString);
+		strcpy(PathString, "/");
+	} else {
+		LqHttpPrsUrl(QueryString,
+			&SchemeStart, &SchemeEnd,
+			&UserInfoStart, &UserInfoEnd,
+			&HostStart, &HostEnd,
+			&PortStart, &PortEnd,
+			&DirStart, &DirEnd,
+			&QueryStart, &QueryEnd,
+			&FragmentStart, &FragmentEnd,
+			&End, &TypeHost,
+			NULL, NULL
+			);
+		strncpy(HostString, HostStart, HostEnd - HostStart);
+		HostString[HostEnd - HostStart] = '\0';
+		strncpy(PathString, DirStart, End - DirStart);
+		PathString[End - DirStart] = '\0';
+	}
+
 
 	const int HostStringLen = strlen(HostString);
 	const int PathStringLen = strlen(PathString);
 
-	for (;;) {
 
+	for (;;) {
+#ifdef DOH_CONSOLE_DBG 
+		if (!_CrtCheckMemory()) {
+			int v = *((int*)NULL);
+		}
+#endif
 		Fds[1].revents = 0;
 		int PollRes = LqPollCheck(Fds, CountFds, WaitTime);
 		if (Fds[0].revents & LQ_POLLIN) { //If have input task event
@@ -697,26 +726,54 @@ static unsigned __stdcall WorkerProc(void* data) {
 					break;
 				}
 
-				int Base64Len = LqDataToBase64(true, false, CurTsk->Buf, CurTsk->BufLen, Base64Buf, Base64BufSize - 3);
-				if ((SendBufferPos + (Base64Len + 256 + HostStringLen + PathStringLen)) > SendBufferSize) { //If queue very hight
-					goto Continue4;
+
+				if (Wrk->ServerInfo->IsDNSOverTLS) {
+					/* DNS Over TLS
+						https://datatracker.ietf.org/doc/html/rfc1035#section-4.2.2
+						https://datatracker.ietf.org/doc/html/rfc8484#section-5.2 
+					*/
+
+					if ((SendBufferPos + CurTsk->BufLen + sizeof(uint16_t)) > SendBufferSize) { //If queue very hight
+						goto Continue4;
+					}
+
+					*((uint16_t*)(SendBuffer + SendBufferPos)) = htons(CurTsk->BufLen);
+					SendBufferPos += sizeof(uint16_t);
+					memcpy(SendBuffer + SendBufferPos, CurTsk->Buf, CurTsk->BufLen);
+					SendBufferPos += CurTsk->BufLen;
+				} else {
+					/* DNS Over HTTPS */
+
+					//int Base64Len = LqDataToBase64(true, false, CurTsk->Buf, CurTsk->BufLen, Base64Buf, Base64BufSize - 3);
+					//if ((SendBufferPos + (Base64Len + 256 + HostStringLen + PathStringLen)) > SendBufferSize) { //If queue very hight
+					//	goto Continue4;
+					//}
+					if ((SendBufferPos + 256 + HostStringLen + PathStringLen + CurTsk->BufLen) > SendBufferSize) { //If queue very hight
+						goto Continue4;
+					}
+					int WrittenInBuf = snprintf(
+						SendBuffer + SendBufferPos,
+						SendBufferSize - SendBufferPos,
+						"POST %s HTTP/1.1\r\n"
+						"Host: %s\r\n"
+						"Accept: application/dns-message\r\n" /* application/dns-message, application/dns-udpwireformat */
+						"Content-Type: application/dns-message\r\n"
+						"Connection: keep-alive\r\n"
+						"Content-Length: %i\r\n"
+						//"User-Agent: curl/7.54.0\r\n"
+						"\r\n",
+						PathString,
+						//Base64Buf,
+						HostString,
+						(int)CurTsk->BufLen
+						);
+					SendBufferPos += WrittenInBuf;
+					memcpy(SendBuffer + SendBufferPos, CurTsk->Buf, CurTsk->BufLen);
+					SendBufferPos += CurTsk->BufLen;
 				}
 
-				int WrittenInBuf = snprintf(
-					SendBuffer + SendBufferPos,
-					SendBufferSize - SendBufferPos,
-					"GET %s?dns=%s HTTP/1.1\r\n"
-					"Host: %s\r\n"
-					"Accept: application/dns-udpwireformat\r\n"
-					"Connection: keep-alive\r\n"
-					"\r\n",
-					PathString,
-					Base64Buf,
-					HostString
-					);
 				Fds[1].events |= LQ_POLLOUT;
 				Fds[1].revents |= LQ_POLLOUT;
-				SendBufferPos += WrittenInBuf;
 
 				Wrk->TskLoker.LockWriteYield();
 				Wrk->CurTsk = Wrk->CurTsk->PrevTsk;
@@ -764,91 +821,136 @@ static unsigned __stdcall WorkerProc(void* data) {
 			}
 			ReciveBufferPos += Readed;
 		lblContinue2:;
-			ContentLen = 0;
-			RetStatus = -1;
-			IsHaveEndHeaders = false;
 
-			for (c = ReciveBuffer, m = ReciveBuffer + ReciveBufferPos - 4; c <= m; c++) {
-				if (*((uint32_t*)c) == HTTPEndHeaders) { //If have all headers
-					IsHaveEndHeaders = true;
-					{
-						char *k = ReciveBuffer;
-						for (; (k < c) && ((*k == ' ') || (*k == '\t')); k++);
-						for (; (k < c) && (*k != ' ') && (*k != '\t'); k++);
-						for (; (k < c) && ((*k == ' ') || (*k == '\t')); k++);
-						RetStatus = atoi(k);
+			if (Wrk->ServerInfo->IsDNSOverTLS) {
+				/* DNS Over TLS */
+				if (ReciveBufferPos >= sizeof(uint16_t)) {
+					uint16_t SizeDNSPkt = htons(*(uint16_t*)ReciveBuffer);/* read size*/
+					if((SizeDNSPkt + sizeof(uint16_t)) >= ReciveBufferSize)
+						goto lblPollHup;
+					if ((SizeDNSPkt + sizeof(uint16_t)) <= ReciveBufferPos) {
+						Wrk->TskLoker.LockReadYield();
+						DnsReq* FirstReq = Wrk->EndTsk;
+						Wrk->TskLoker.UnlockRead();
+
+						DbgConsolePrintf("Call sendto() send DNS pkt from %s\n", Wrk->ServerInfo->Ip);
+						sendto(UDPSocket, ReciveBuffer + sizeof(uint16_t), SizeDNSPkt, 0, (sockaddr*)&FirstReq->From, FirstReq->FromLen);
+						
+						Wrk->TskLoker.LockWriteYield();
+						FirstReq = Wrk->EndTsk;
+						Wrk->EndTsk = FirstReq->PrevTsk;
+						if (Wrk->CurTsk == FirstReq) {
+							Wrk->CurTsk = FirstReq->PrevTsk;
+						}
+						if (Wrk->EndTsk == NULL) {
+							Wrk->StartTsk = NULL;
+						}
+						else {
+							Wrk->EndTsk->NextTsk = NULL;
+						}
+						Wrk->TskLen--;
+						Wrk->TskLoker.UnlockWrite();
+
+						LqFastAlloc::Delete(FirstReq);
+
+						ReciveBufferPos -= (SizeDNSPkt + sizeof(uint16_t));
+						memmove(ReciveBuffer, ReciveBuffer + SizeDNSPkt + sizeof(uint16_t), ReciveBufferPos);
+
+						if (ReciveBufferPos > 0)
+							goto lblContinue2;
 					}
-					for (char* u = ReciveBuffer; u < c; u++) {
-						if (*((uint16_t*)u) == HTTPEndHeader) {
-							u += 2;
-							for (; (u < c) && ((*u == ' ') || (*u == '\t')); u++);
+				}
+			} else {
+				/* DNS Over HTTPS*/
+				ContentLen = 0;
+				RetStatus = -1;
+				IsHaveEndHeaders = false;
+				
+				for (c = ReciveBuffer, m = ReciveBuffer + ReciveBufferPos - 4; c <= m; c++) {
+					if (*((uint32_t*)c) == HTTPEndHeaders) { //If have all headers
+						IsHaveEndHeaders = true;
+						{
+							char *k = ReciveBuffer;
+							for (; (k < c) && ((*k == ' ') || (*k == '\t')); k++);
+							for (; (k < c) && (*k != ' ') && (*k != '\t'); k++);
+							for (; (k < c) && ((*k == ' ') || (*k == '\t')); k++);
+							RetStatus = atoi(k);
+						}
+						for (char* u = ReciveBuffer; u < c; u++) {
+							if (*((uint16_t*)u) == HTTPEndHeader) {
+								u += 2;
+								for (; (u < c) && ((*u == ' ') || (*u == '\t')); u++);
 
-							if (strnicmp(u, "content-length", sizeof("content-length") - 1) == 0) {
-								u += (sizeof("content-length") - 1);
-								for (; (u < c) && ((*u == '\t') || (*u == ' ') || (*u == ':')); u++);
-								ContentLen = atoi(u);
-								if ((ContentLen <= 0) || (ContentLen > (ReciveBufferSize - ((c + 20) - ReciveBuffer))))/* Is not have place for responce*/
-									goto lblPollHup;
+								if (strnicmp(u, "content-length", sizeof("content-length") - 1) == 0) {
+									u += (sizeof("content-length") - 1);
+									for (; (u < c) && ((*u == '\t') || (*u == ' ') || (*u == ':')); u++);
+									ContentLen = atoi(u);
+									if ((ContentLen <= 0) || (ContentLen >(ReciveBufferSize - ((c + 20) - ReciveBuffer))))/* Is not have place for responce*/
+										goto lblPollHup;
 
-								goto lblContinue3;
+									goto lblContinue3;
+								}
 							}
 						}
+						/* Is not have content-length header */
+						if (RetStatus == 200) {
+							goto lblPollHup;
+						}
+						else {
+							goto lblContinue3;/* If ret status is not a 200 then print error */
+						}
 					}
-					/* Is not have content-length header */
-					if (RetStatus == 200){
+				}
+			lblContinue3:;
+				if (IsHaveEndHeaders && ((((c - ReciveBuffer) + 4) + ContentLen) <= ReciveBufferPos)) {
+					if (ContentLen < 0) {
 						goto lblPollHup;
-					} else {
-						goto lblContinue3;/* If ret status is not a 200 then print error */
 					}
-				}
-			}
-		lblContinue3:;
-			if (IsHaveEndHeaders && ((((c - ReciveBuffer) + 4) + ContentLen) <= ReciveBufferPos)) {
-				if (ContentLen < 0) {
-					goto lblPollHup;
-				}
-				c += 4;
+					c += 4;
 
-				Wrk->TskLoker.LockReadYield();
-				DnsReq* FisrtReq = Wrk->EndTsk;
-				Wrk->TskLoker.UnlockRead();
-				if (RetStatus == 200) {
-					DbgConsolePrintf("Call sendto() send DNS pkt from %s\n", Wrk->ServerInfo->Ip);
-					sendto(UDPSocket, c, ContentLen, 0, (sockaddr*)&FisrtReq->From, FisrtReq->FromLen);
-				} else {
-					char Buf[500];
-					snprintf(
-						Buf,
-						sizeof(Buf) - 2,
-						"DOH_Windows: Dns server host %s (ip %s) returned %i status",
-						HostString,
-						Wrk->ServerInfo->Ip,
-						(int)RetStatus
-						);
-					OutputDebugStringA(Buf);
-					DbgConsolePrintf("%s\n", Buf);
-				}
-				Wrk->TskLoker.LockWriteYield();
-				FisrtReq = Wrk->EndTsk;
-				Wrk->EndTsk = FisrtReq->PrevTsk;
-				if (Wrk->CurTsk == FisrtReq) {
-					Wrk->CurTsk = FisrtReq->PrevTsk;
-				}
-				if (Wrk->EndTsk == NULL) {
-					Wrk->StartTsk = NULL;
-				} else {
-					Wrk->EndTsk->NextTsk = NULL;
-				}
-				Wrk->TskLen--;
-				Wrk->TskLoker.UnlockWrite();
+					Wrk->TskLoker.LockReadYield();
+					DnsReq* FirstReq = Wrk->EndTsk;
+					Wrk->TskLoker.UnlockRead();
 
-				LqFastAlloc::Delete(FisrtReq);
+					if (RetStatus == 200) {
+						DbgConsolePrintf("Call sendto() send DNS pkt from %s\n", Wrk->ServerInfo->Ip);
+						sendto(UDPSocket, c, ContentLen, 0, (sockaddr*)&FirstReq->From, FirstReq->FromLen);
+					} else {
+						char Buf[500];
+						snprintf(
+							Buf,
+							sizeof(Buf) - 2,
+							"DOH_Windows: Dns server host %s (ip %s) returned %i status",
+							HostString,
+							Wrk->ServerInfo->Ip,
+							(int)RetStatus
+							);
+						OutputDebugStringA(Buf);
+						DbgConsolePrintf("%s\n", Buf);
+					}
 
-				ReciveBufferPos -= ((c - ReciveBuffer) + ContentLen);
-				memmove(ReciveBuffer, c + ContentLen, ReciveBufferPos);
+					Wrk->TskLoker.LockWriteYield();
+					FirstReq = Wrk->EndTsk;
+					Wrk->EndTsk = FirstReq->PrevTsk;
+					if (Wrk->CurTsk == FirstReq) {
+						Wrk->CurTsk = FirstReq->PrevTsk;
+					}
+					if (Wrk->EndTsk == NULL) {
+						Wrk->StartTsk = NULL;
+					} else {
+						Wrk->EndTsk->NextTsk = NULL;
+					}
+					Wrk->TskLen--;
+					Wrk->TskLoker.UnlockWrite();
 
-				if (ReciveBufferPos > 0)
-					goto lblContinue2;
+					LqFastAlloc::Delete(FirstReq);
+
+					ReciveBufferPos -= ((c - ReciveBuffer) + ContentLen);
+					memmove(ReciveBuffer, c + ContentLen, ReciveBufferPos);
+
+					if (ReciveBufferPos > 0)
+						goto lblContinue2;
+				}
 			}
 		}
 
@@ -894,6 +996,13 @@ static unsigned __stdcall WorkerProc(void* data) {
 	free(SendBuffer);
 	free(ReciveBuffer);
 	free(Base64Buf);
+
+#ifdef DOH_CONSOLE_DBG 
+	if (!_CrtCheckMemory()) {
+		int v = *((int*)NULL);
+	}
+#endif
+
 	return 0;
 }
 
@@ -994,6 +1103,12 @@ static unsigned __stdcall MainDOH(void* data) {
 		OutputDebugStringA(Buf);
 		DbgConsolePrintf("SSL cert verification is used");
 	}
+
+#ifdef DOH_CONSOLE_DBG 
+	if (!_CrtCheckMemory()) {
+		int v = *((int*)NULL);
+	}
+#endif
 
 
 	OutputDebugString(TEXT("DOH_Windows: SSL_library_init() executed"));
@@ -1139,6 +1254,12 @@ static unsigned __stdcall MainDOH(void* data) {
 
 		LqEventSet(Workers[TargetWrk]->Event);
 		DbgConsolePrintf("Send job to worker(set event)\n");
+
+#ifdef DOH_CONSOLE_DBG 
+		if (!_CrtCheckMemory()) {
+			int v = *((int*)NULL);
+		}
+#endif
 	}
 lblOut:
 

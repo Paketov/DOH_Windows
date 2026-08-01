@@ -5,8 +5,8 @@ DisconnectWaitTime:
 LocalAddress:
  127.0.0.1 53
 DOHServers:
- 8.8.8.8 443 https://dns.google/dns-query
- 8.8.4.4 443 https://dns.google/dns-query
+ 8.8.8.8 443 https://dns.google/dns-query #Traffic via DOH by default
+ DOT 149.112.112.112 853 dns.quad9.net  #Traffic via DOT(DNS over TLS)
 HostsMatch:
   ?*.lon.llnw.net$		0.0.0.0
   ?*.telemetry.microsoft.com$
@@ -16,6 +16,6 @@ HostsMatch:
   ?*windowsupdate.com$
   ?*checkappexec.microsoft.com$
   ?*vortex.data.microsoft.com$
-  ?*win8.ipv6.microsoft.com$
+  #?*win8.ipv6.microsoft.com$
   ^push.services.mozilla.com$
 
