@@ -608,11 +608,11 @@ static unsigned __stdcall WorkerProc(void* data) {
 
 	const int SendBufferSize = 8192;
 	const int ReciveBufferSize = 8192; 
-	const int Base64BufSize = 8192;
+	//const int Base64BufSize = 8192;
 
-	char* SendBuffer = (char*)malloc(SendBufferSize);
-	char* ReciveBuffer = (char*)malloc(ReciveBufferSize);
-	char* Base64Buf = (char*)malloc(Base64BufSize);
+	char* SendBuffer = (char*)malloc(SendBufferSize + 16);
+	char* ReciveBuffer = (char*)malloc(ReciveBufferSize + 16);
+	//char* Base64Buf = (char*)malloc(Base64BufSize + 16);
 
 	int SendBufferPos = 0;
 	int ReciveBufferPos = 0;
@@ -784,7 +784,6 @@ static unsigned __stdcall WorkerProc(void* data) {
 		Continue4:;
 		}
 		if ((CountFds > 1) && ((Fds[1].revents & LQ_POLLOUT) || (SendBufferPos > 0))) { //Is need send data via socket
-
 			if (SendBufferPos > 0) {
 				int Written = SSL_write(ssl, SendBuffer, SendBufferPos);
 				if (Written <= 0) {
@@ -808,8 +807,9 @@ static unsigned __stdcall WorkerProc(void* data) {
 				WaitTime = 500;
 			}
 		}
+
 		if ((CountFds > 1) && (Fds[1].revents & LQ_POLLIN)) { //If have data in socket
-			int Readed = SSL_read(ssl, ReciveBuffer + ReciveBufferPos, ReciveBufferSize - ReciveBufferPos - 3);
+			int Readed = SSL_read(ssl, ReciveBuffer + ReciveBufferPos, ReciveBufferSize - ReciveBufferPos);
 			if (Readed <= 0) {
 				switch (SSL_get_error(ssl, Readed)) {
 				case SSL_ERROR_NONE: break;
@@ -826,7 +826,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 				/* DNS Over TLS */
 				if (ReciveBufferPos >= sizeof(uint16_t)) {
 					uint16_t SizeDNSPkt = htons(*(uint16_t*)ReciveBuffer);/* read size*/
-					if((SizeDNSPkt + sizeof(uint16_t)) >= ReciveBufferSize)
+					if((SizeDNSPkt + sizeof(uint16_t)) > ReciveBufferSize)
 						goto lblPollHup;
 					if ((SizeDNSPkt + sizeof(uint16_t)) <= ReciveBufferPos) {
 						Wrk->TskLoker.LockReadYield();
@@ -995,7 +995,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 
 	free(SendBuffer);
 	free(ReciveBuffer);
-	free(Base64Buf);
+	//free(Base64Buf);
 
 #ifdef DOH_CONSOLE_DBG 
 	if (!_CrtCheckMemory()) {
