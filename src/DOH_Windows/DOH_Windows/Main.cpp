@@ -1158,8 +1158,7 @@ static unsigned __stdcall MainDOH(void* data) {
 	lblContinue5:;
 		Req->FromLen = sizeof(Req->From);
 		Req->BufLen = 0;
-		int res = -2;
-		res = recvfrom(UDPSocket, (char*)Req->Buf, sizeof(Req->Buf), 0, (sockaddr*)&Req->From, &Req->FromLen);
+		int res = recvfrom(UDPSocket, (char*)Req->Buf, sizeof(Req->Buf), 0, (sockaddr*)&Req->From, &Req->FromLen);
 #ifdef DOH_CONSOLE_DBG
 		if (res <= 0) {
 			int RecvfromErr = WSAGetLastError(); //WSAECONNRESET
