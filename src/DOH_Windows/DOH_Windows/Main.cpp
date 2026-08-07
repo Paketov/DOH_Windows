@@ -29,9 +29,6 @@
 # include <wincrypt.h>
 # include <cryptuiapi.h>
 
-# include <Winternl.h>
-# include <ntstatus.h>
-
 # pragma comment (lib, "crypt32.lib")
 # pragma comment (lib, "cryptui.lib")
 
