@@ -29,6 +29,9 @@
 # include <wincrypt.h>
 # include <cryptuiapi.h>
 
+# include <Winternl.h>
+# include <ntstatus.h>
+
 # pragma comment (lib, "crypt32.lib")
 # pragma comment (lib, "cryptui.lib")
 
@@ -580,12 +583,12 @@ static const uint16_t HTTPEndHeader = *((uint16_t*)"\r\n");
 static unsigned __stdcall WorkerProc(void* data) {
 	Worker* Wrk = (Worker*)data;
 
-	SSL* ssl;
+	SSL* ssl = NULL;
 	int Socket = -1;
 	LqTimeMillisec WaitTime = INFINITE;
 	int CountFds = 1;
 	LqPoll Fds[2];
-	DnsReq* CurTsk;
+	DnsReq* CurTsk = NULL;
 	Fds[0].fd = Wrk->Event;
 	Fds[0].events = LQ_POLLIN;
 	int QueryStringLen = strlen(Wrk->ServerInfo->Query);
@@ -595,14 +598,14 @@ static unsigned __stdcall WorkerProc(void* data) {
 	strncpy(QueryString, Wrk->ServerInfo->Query, QueryStringLen);
 	QueryString[QueryStringLen] = '\0';
 
-	char* SchemeStart; char* SchemeEnd;
-	char* UserInfoStart; char* UserInfoEnd;
-	char* HostStart; char* HostEnd;
-	char* PortStart; char* PortEnd;
-	char* DirStart; char* DirEnd;
-	char* QueryStart; char* QueryEnd;
-	char* FragmentStart; char* FragmentEnd;
-	char* End; char TypeHost;
+	char* SchemeStart = NULL; char* SchemeEnd = NULL;
+	char* UserInfoStart = NULL; char* UserInfoEnd = NULL;
+	char* HostStart = NULL; char* HostEnd = NULL;
+	char* PortStart = NULL; char* PortEnd = NULL;
+	char* DirStart = NULL; char* DirEnd = NULL;
+	char* QueryStart = NULL; char* QueryEnd = NULL;
+	char* FragmentStart = NULL; char* FragmentEnd = NULL;
+	char* End = NULL; char TypeHost = 0;
 
 
 
@@ -620,7 +623,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 	int ContentLen = 0;
 	int RetStatus = -1;
 	bool IsHaveEndHeaders = false;
-	char* c, *m;
+	char* c = NULL, *m = NULL;
 
 	if (strstr(QueryString, "/") == 0) {
 		strcpy(HostString, QueryString);
@@ -647,7 +650,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 	const int HostStringLen = strlen(HostString);
 	const int PathStringLen = strlen(PathString);
 
-
+	OutputDebugString(TEXT("DOH_Windows: enter worker proc main loop"));
 	for (;;) {
 #ifdef DOH_CONSOLE_DBG 
 		if (!_CrtCheckMemory()) {
@@ -664,6 +667,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 				Socket = ConnConnectTCP(Wrk->ServerInfo->Ip, Wrk->ServerInfo->Port);
 				if (Socket == -1) {
 					DbgConsolePrintf("Conn error %s\n", Wrk->ServerInfo->Ip);
+					OutputDebugString(TEXT("DOH_Windows: ConnConnectTCP returned -1. Maybe net unreacheble"));
 					goto lblPollHup;
 				}
 				ssl = SSL_new(Wrk->ssl_ctx);
@@ -844,8 +848,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 						}
 						if (Wrk->EndTsk == NULL) {
 							Wrk->StartTsk = NULL;
-						}
-						else {
+						} else {
 							Wrk->EndTsk->NextTsk = NULL;
 						}
 						Wrk->TskLen--;
@@ -968,12 +971,9 @@ static unsigned __stdcall WorkerProc(void* data) {
 			}
 			WaitTime = INFINITE;
 			CountFds = 1;
-
 			Fds[1].events = 0;
-
 			SendBufferPos = 0;
 			ReciveBufferPos = 0;
-
 			Wrk->TskLoker.LockWriteYield();
 			//LqEventReset(Fds[0].fd);
 			for (DnsReq* r = Wrk->StartTsk, *f; r != NULL; r = f) {
@@ -989,6 +989,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 				break;
 		}
 	}
+	OutputDebugString(TEXT("DOH_Windows: WorkerProc memory free"));
 	free(QueryString);
 	free(HostString);
 	free(PathString);
@@ -1002,7 +1003,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 		int v = *((int*)NULL);
 	}
 #endif
-
+	OutputDebugString(TEXT("DOH_Windows: exit from WorkerProc"));
 	return 0;
 }
 
@@ -1068,8 +1069,18 @@ static unsigned __stdcall MainDOH(void* data) {
 	SSL_library_init();
 
 	SSL_CTX* ctx = SSL_CTX_new(SSLv23_client_method());
+	if (ctx == NULL) {
+		OutputDebugString(TEXT("DOH_Windows: Cannot create SSL_CTX"));
+		DbgConsolePrintf("Cannot create SSL_CTX");
+		goto lblOut;
+	}
 	bool IsVerifyCA = true;
 	SSL_CTX_set_default_verify_paths(ctx);
+#ifdef DOH_CONSOLE_DBG 
+	if (!_CrtCheckMemory()) {
+		int v = *((int*)NULL);
+	}
+#endif
 	if (SSL_CACertFileForVerify != NULL) {
 		if (SSL_CTX_load_verify_locations(ctx, SSL_CACertFileForVerify, NULL) != 1) {
 			OutputDebugString(TEXT("DOH_Windows: SSL SSL_CTX_load_verify_locations() returned 0, PEM file cert for verify not used"));
@@ -1123,6 +1134,7 @@ static unsigned __stdcall MainDOH(void* data) {
 	if (CountServers < 1) {
 		OutputDebugString(TEXT("DOH_Windows: DOH_Main() Error CountServers < 1"));
 		closesocket(UDPSocket);
+		UDPSocket = -1;
 		goto lblOut;
 	}
 
@@ -1149,8 +1161,8 @@ static unsigned __stdcall MainDOH(void* data) {
 	lblContinue5:;
 		Req->FromLen = sizeof(Req->From);
 		Req->BufLen = 0;
-
-		int res = recvfrom(UDPSocket, (char*)Req->Buf, sizeof(Req->Buf), 0, (sockaddr*)&Req->From, &Req->FromLen);
+		int res = -2;
+		res = recvfrom(UDPSocket, (char*)Req->Buf, sizeof(Req->Buf), 0, (sockaddr*)&Req->From, &Req->FromLen);
 #ifdef DOH_CONSOLE_DBG
 		if (res <= 0) {
 			int RecvfromErr = WSAGetLastError(); //WSAECONNRESET
@@ -1164,7 +1176,7 @@ static unsigned __stdcall MainDOH(void* data) {
 			LqFastAlloc::Delete(Req);
 			break;
 		}
-
+		
 		if (res <= 0) {
 			//if (UDPSocket != -1)
 			//closesocket(UDPSocket);
@@ -1267,16 +1279,20 @@ lblOut:
 
 	if (Workers != NULL) {
 		for (int i = 0; i < CountWorkers; i++) {
+			OutputDebugString(TEXT("DOH_Windows: Stopping worker"));
 			Workers[i]->IsEndWork.store(true);
 			LqEventSet(Workers[i]->Event);
 			WaitForSingleObject(Workers[i]->ThreadHandle, INFINITE);
 			CloseHandle(Workers[i]->ThreadHandle);
 			LqFileClose(Workers[i]->Event);
 			LqFastAlloc::Delete(Workers[i]);
+			OutputDebugString(TEXT("DOH_Windows: Worker stopped"));
 		}
 		free(Workers);
 		Workers = NULL;
 	}
+
+	OutputDebugString(TEXT("DOH_Windows: Workers threads stopped"));
 	//if (UDPSocket != -1) {
 	//	closesocket(UDPSocket);
 	//	UDPSocket = -1;
@@ -1295,6 +1311,8 @@ lblOut:
 		free(ServersInfo);
 		ServersInfo = NULL;
 	}
+
+	OutputDebugString(TEXT("DOH_Windows: ServersInfo memory free"));
 
 	if (LocalAddress2 != LocalAddress) {
 		free(LocalAddress);
@@ -1331,15 +1349,17 @@ static DWORD WINAPI ServiceHandler(DWORD dwControl) {
 		OutputDebugString(TEXT("DOH_Windows: Runing ServiceHandler(SERVICE_CONTROL_STOP)"));
 		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
 		IsStopService.store(true);
-		if (UDPSocket != -1)
+		if (UDPSocket != -1) {
 			closesocket(UDPSocket);
+		}
 		break;
 	case SERVICE_CONTROL_SHUTDOWN:
 		OutputDebugString(TEXT("DOH_Windows: Runing ServiceHandler(SERVICE_CONTROL_SHUTDOWN)"));
 		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
 		IsStopService.store(true);
-		if(UDPSocket != -1)
+		if (UDPSocket != -1) {
 			closesocket(UDPSocket);
+		}
 		break;
 	case SERVICE_CONTROL_PAUSE:
 		OutputDebugString(TEXT("DOH_Windows: Runing ServiceHandler(SERVICE_CONTROL_PAUSE)"));
