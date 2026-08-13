@@ -28,6 +28,7 @@
 # include <process.h>
 # include <wincrypt.h>
 # include <cryptuiapi.h>
+# include <assert.h>
 
 # pragma comment (lib, "crypt32.lib")
 # pragma comment (lib, "cryptui.lib")
@@ -82,9 +83,11 @@ static struct _wsa_data {
 #endif
 
 #ifdef DOH_CONSOLE_DBG
-#define DbgConsolePrintf(fmt, ...) printf(fmt, __VA_ARGS__)
+#define DbgConsolePrintf(fmt, ...)	printf(fmt, __VA_ARGS__)
+#define DbgCheckHeap()				assert(_CrtCheckMemory())
 #else
-#define DbgConsolePrintf(fmt, ...) do{} while(0)
+#define DbgConsolePrintf(fmt, ...)	do{} while(0)
+#define DbgCheckHeap()				do{} while(0)
 #endif
 
 
@@ -620,6 +623,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 	int ContentLen = 0;
 	int RetStatus = -1;
 	bool IsHaveEndHeaders = false;
+	bool IsPktReceived = false;
 	char* c = NULL, *m = NULL;
 
 	if (strstr(QueryString, "/") == 0) {
@@ -649,11 +653,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 
 	OutputDebugString(TEXT("DOH_Windows: enter worker proc main loop"));
 	for (;;) {
-#ifdef DOH_CONSOLE_DBG 
-		if (!_CrtCheckMemory()) {
-			int v = *((int*)NULL);
-		}
-#endif
+		DbgCheckHeap();
 		Fds[1].revents = 0;
 		int PollRes = LqPollCheck(Fds, CountFds, WaitTime);
 		if (Fds[0].revents & LQ_POLLIN) { //If have input task event
@@ -833,10 +833,13 @@ static unsigned __stdcall WorkerProc(void* data) {
 						Wrk->TskLoker.LockReadYield();
 						DnsReq* FirstReq = Wrk->EndTsk;
 						Wrk->TskLoker.UnlockRead();
-
+						if (FirstReq == NULL)
+							goto lblPollHup;
 						DbgConsolePrintf("Call sendto() send DNS pkt from %s\n", Wrk->ServerInfo->Ip);
 						sendto(UDPSocket, ReciveBuffer + sizeof(uint16_t), SizeDNSPkt, 0, (sockaddr*)&FirstReq->From, FirstReq->FromLen);
 						
+						IsPktReceived = true;
+
 						Wrk->TskLoker.LockWriteYield();
 						FirstReq = Wrk->EndTsk;
 						Wrk->EndTsk = FirstReq->PrevTsk;
@@ -911,10 +914,13 @@ static unsigned __stdcall WorkerProc(void* data) {
 					Wrk->TskLoker.LockReadYield();
 					DnsReq* FirstReq = Wrk->EndTsk;
 					Wrk->TskLoker.UnlockRead();
+					if (FirstReq == NULL)
+						goto lblPollHup;
 
 					if (RetStatus == 200) {
 						DbgConsolePrintf("Call sendto() send DNS pkt from %s\n", Wrk->ServerInfo->Ip);
 						sendto(UDPSocket, c, ContentLen, 0, (sockaddr*)&FirstReq->From, FirstReq->FromLen);
+						IsPktReceived = true;
 					} else {
 						char Buf[500];
 						snprintf(
@@ -973,19 +979,39 @@ static unsigned __stdcall WorkerProc(void* data) {
 			ReciveBufferPos = 0;
 			Wrk->TskLoker.LockWriteYield();
 			//LqEventReset(Fds[0].fd);
-			for (DnsReq* r = Wrk->StartTsk, *f; r != NULL; r = f) {
-				f = r->NextTsk;
-				LqFastAlloc::Delete(r);
+
+			if (IsPktReceived) { /*  Is recived paket from DOH server and connection unexpectedly closed */
+				Wrk->CurTsk = Wrk->EndTsk;
+				if (Wrk->CurTsk != NULL)
+					LqEventSet(Fds[0].fd);
+			} else { /* Is not recived paket from DOH server, then clear task queue */
+				for (DnsReq* r = Wrk->StartTsk, *f; r != NULL; r = f) {
+					f = r->NextTsk;
+					LqFastAlloc::Delete(r);
+				}
+				Wrk->CurTsk = NULL;
+				Wrk->StartTsk = NULL;
+				Wrk->EndTsk = NULL;
+				Wrk->TskLen = 0;
 			}
-			Wrk->CurTsk = NULL;
-			Wrk->StartTsk = NULL;
-			Wrk->EndTsk = NULL;
-			Wrk->TskLen = 0;
 			Wrk->TskLoker.UnlockWrite();
+			IsPktReceived = false;
 			if (Wrk->IsEndWork.load())
 				break;
 		}
 	}
+
+	Wrk->TskLoker.LockWriteYield();
+	for (DnsReq* r = Wrk->StartTsk, *f; r != NULL; r = f) {
+		f = r->NextTsk;
+		LqFastAlloc::Delete(r);
+	}
+	Wrk->CurTsk = NULL;
+	Wrk->StartTsk = NULL;
+	Wrk->EndTsk = NULL;
+	Wrk->TskLen = 0;
+	Wrk->TskLoker.UnlockWrite();
+
 	OutputDebugString(TEXT("DOH_Windows: WorkerProc memory free"));
 	free(QueryString);
 	free(HostString);
@@ -995,11 +1021,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 	free(ReciveBuffer);
 	//free(Base64Buf);
 
-#ifdef DOH_CONSOLE_DBG 
-	if (!_CrtCheckMemory()) {
-		int v = *((int*)NULL);
-	}
-#endif
+	DbgCheckHeap();
 	OutputDebugString(TEXT("DOH_Windows: exit from WorkerProc"));
 	return 0;
 }
@@ -1073,11 +1095,7 @@ static unsigned __stdcall MainDOH(void* data) {
 	}
 	bool IsVerifyCA = true;
 	SSL_CTX_set_default_verify_paths(ctx);
-#ifdef DOH_CONSOLE_DBG 
-	if (!_CrtCheckMemory()) {
-		int v = *((int*)NULL);
-	}
-#endif
+	DbgCheckHeap();
 	if (SSL_CACertFileForVerify != NULL) {
 		if (SSL_CTX_load_verify_locations(ctx, SSL_CACertFileForVerify, NULL) != 1) {
 			OutputDebugString(TEXT("DOH_Windows: SSL SSL_CTX_load_verify_locations() returned 0, PEM file cert for verify not used"));
@@ -1112,11 +1130,7 @@ static unsigned __stdcall MainDOH(void* data) {
 		DbgConsolePrintf("SSL cert verification is used");
 	}
 
-#ifdef DOH_CONSOLE_DBG 
-	if (!_CrtCheckMemory()) {
-		int v = *((int*)NULL);
-	}
-#endif
+	DbgCheckHeap();
 
 
 	OutputDebugString(TEXT("DOH_Windows: SSL_library_init() executed"));
@@ -1263,11 +1277,7 @@ static unsigned __stdcall MainDOH(void* data) {
 		LqEventSet(Workers[TargetWrk]->Event);
 		DbgConsolePrintf("Send job to worker(set event)\n");
 
-#ifdef DOH_CONSOLE_DBG 
-		if (!_CrtCheckMemory()) {
-			int v = *((int*)NULL);
-		}
-#endif
+		DbgCheckHeap();
 	}
 lblOut:
 
