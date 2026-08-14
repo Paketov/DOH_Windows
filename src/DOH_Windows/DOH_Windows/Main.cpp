@@ -980,7 +980,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 			Wrk->TskLoker.LockWriteYield();
 			//LqEventReset(Fds[0].fd);
 
-			if (IsPktReceived && (Wrk->TskLen < 50)) { /*  Is recived paket from DOH server and connection unexpectedly closed */
+			if (IsPktReceived) { /*  Is recived paket from DOH server and connection unexpectedly closed */
 				Wrk->CurTsk = Wrk->EndTsk;
 				if (Wrk->CurTsk != NULL)
 					LqEventSet(Fds[0].fd);
@@ -1257,7 +1257,10 @@ static unsigned __stdcall MainDOH(void* data) {
 			}
 		}
 		Workers[TargetWrk]->TskLoker.LockWriteYield();
-
+		if (Workers[TargetWrk]->TskLen > 50){ /* If tsk queue too long, then skip dns paket */
+			Workers[TargetWrk]->TskLoker.UnlockWrite();
+			goto lblContinue5;
+		}
 		Req->NextTsk = Workers[TargetWrk]->StartTsk;
 		Req->PrevTsk = NULL;
 		if (Req->NextTsk != NULL) {
