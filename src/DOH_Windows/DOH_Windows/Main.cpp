@@ -980,7 +980,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 			Wrk->TskLoker.LockWriteYield();
 			//LqEventReset(Fds[0].fd);
 
-			if (IsPktReceived) { /*  Is recived paket from DOH server and connection unexpectedly closed */
+			if (IsPktReceived && (Wrk->TskLen < 50)) { /*  Is recived paket from DOH server and connection unexpectedly closed */
 				Wrk->CurTsk = Wrk->EndTsk;
 				if (Wrk->CurTsk != NULL)
 					LqEventSet(Fds[0].fd);
