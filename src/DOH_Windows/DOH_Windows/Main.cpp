@@ -1400,9 +1400,34 @@ int main() {
 #endif
 
 extern "C" __declspec(dllexport) VOID WINAPI ServiceMain(DWORD argc, LPTSTR argv[]) {
+	SC_HANDLE ScManngerHandle;
+	SC_HANDLE CurService;
+	SERVICE_FAILURE_ACTIONSW servFailActions;
+	SC_ACTION failActions[3];
+
 	OutputDebugString(TEXT("DOH_Windows: Start ServiceMain()"));
 
 	serviceStatusHandle = RegisterServiceCtrlHandlerW(SVCNAME, (LPHANDLER_FUNCTION)ServiceHandler);
+
+	failActions[0].Type = SC_ACTION_RESTART; //Failure action: Restart Service
+	failActions[0].Delay = 1000; //number of milliseconds to wait before performing failure action = 2minutes
+	failActions[1].Type = SC_ACTION_RESTART;
+	failActions[1].Delay = 1000;
+	failActions[2].Type = SC_ACTION_RESTART;
+	failActions[2].Delay = 1000;
+
+	servFailActions.dwResetPeriod = 86400; // Reset Failures Counter, in Seconds = 1day
+	servFailActions.lpCommand = NULL; //Command to perform due to service failure, not used
+	servFailActions.lpRebootMsg = NULL; //Message during rebooting computer due to service failure, not used
+	servFailActions.cActions = 3; // Number of failure action to manage
+	servFailActions.lpsaActions = failActions;
+	ScManngerHandle = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
+	CurService = OpenServiceW(ScManngerHandle, SVCNAME, SC_MANAGER_ALL_ACCESS);
+
+
+	ChangeServiceConfig2W(CurService, SERVICE_CONFIG_FAILURE_ACTIONS, &servFailActions); //Apply above settings
+	CloseServiceHandle(CurService);
+	CloseServiceHandle(ScManngerHandle);
 
 	UpdateServiceStatus(SERVICE_START_PENDING);
 	//unsigned int ThreadId = 0;
