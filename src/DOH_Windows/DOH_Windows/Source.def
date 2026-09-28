@@ -1,3 +1,4 @@
 EXPORTS
 ServiceMain = ServiceMain
 InstallService = InstallService
+SetFailureActions = SetFailureActions

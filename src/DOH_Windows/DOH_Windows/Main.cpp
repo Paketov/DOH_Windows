@@ -58,7 +58,7 @@
 
 
 #define REQ_PKT_SIZE 4096
-
+#define DOH_WAIT_CONNECT_SEC (6)
 
 # ifndef WSA_VERSION
 #  define WSA_VERSION MAKEWORD(2, 2)
@@ -84,11 +84,16 @@ static struct _wsa_data {
 
 #ifdef DOH_CONSOLE_DBG
 #define DbgConsolePrintf(fmt, ...)	printf(fmt, __VA_ARGS__)
-#define DbgCheckHeap()				assert(_CrtCheckMemory())
 #else
 #define DbgConsolePrintf(fmt, ...)	do{} while(0)
+#endif
+
+#ifdef _DEBUG
+#define DbgCheckHeap()				assert(_CrtCheckMemory())
+#else
 #define DbgCheckHeap()				do{} while(0)
 #endif
+
 
 
 typedef struct HttpsServerInfo {
@@ -120,12 +125,10 @@ typedef struct Worker {
 	DnsReq* EndTsk;
 	DnsReq* CurTsk;
 	int TskLen;
-	int Event;
+	LqHandle Event;
 	unsigned ThreadId;
 	HANDLE ThreadHandle;
 	HttpsServerInfo* ServerInfo;
-	SSL_CTX* ssl_ctx;
-	bool IsVerifyCA;
 	volatile std::atomic<bool> IsEndWork;
 } Worker;
 
@@ -174,53 +177,98 @@ extern "C" FILE * __cdecl __iob_func(void) {
 /* match: search for regexp anywhere in text */
 static int match(char *regexp, char *text);
 
-static int ConnBindUDP(
+static int LqConnIsWouldBlock() {
+	switch (GetLastError()) {
+	case ERROR_IO_PENDING:
+	case WSAEWOULDBLOCK:
+		return 1;
+	}
+	return 0;
+}
+
+static LqHandle ConnBindUDP(
 	const char* Host,
 	const char* Port,
 	int MaxConnections
-	) {
+) {
 	static const int True = 1;
-	int s;
-	addrinfo *Addrs = nullptr, HostInfo = { 0 };
+	static const int False = 0;
+	LqHandle s = LQ_HANDLE_INVALID;
+	addrinfo *Addrs = NULL, HostInfo = { 0 };
 	HostInfo.ai_family = AF_UNSPEC;
 	HostInfo.ai_socktype = SOCK_DGRAM; // SOCK_STREAM;
 	HostInfo.ai_flags = AI_PASSIVE;//AI_ALL;
 	HostInfo.ai_protocol = IPPROTO_UDP; // IPPROTO_TCP;
-	int res;
-	if ((res = getaddrinfo(((Host != NULL) && (*Host != '\0')) ? Host : (const char*)NULL, Port, &HostInfo, &Addrs)) != 0) {
-		return -1;
+
+	if (getaddrinfo(((Host != NULL) && (*Host != '\0')) ? Host : (const char*)NULL, Port, &HostInfo, &Addrs) != 0) {
+		return LQ_HANDLE_INVALID;
 	}
 
 	for (auto i = Addrs; i != NULL; i = i->ai_next) {
-		if ((s = socket(i->ai_family, i->ai_socktype, i->ai_protocol)) == -1)
+		if (LqHandleIsInvalid(s = socket(i->ai_family, i->ai_socktype, i->ai_protocol)))
 			continue;
-		LqDescrSetInherit(s, 0);
-		if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (char*)&True, sizeof(True)) == -1) {
-			continue;
-		}
+		LqHandleSetInherit(s, 0);
+		if (setsockopt(s, SOL_SOCKET, SO_REUSEADDR, (char*)&True, sizeof(True)) == -1)
+			goto lbl_err;
 		if (i->ai_family == AF_INET6) {
-			if (setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, (char*)&True, sizeof(True)) == -1) {
-				continue;
-			}
+			if (setsockopt(s, IPPROTO_IPV6, IPV6_V6ONLY, (char*)&False, sizeof(False)) == -1)
+				goto lbl_err;
 		}
 		if (bind(s, i->ai_addr, i->ai_addrlen) == -1) {
-			closesocket(s);
-			s = -1;
+lbl_err:
+			LqHandleClose(s);
+			s = LQ_HANDLE_INVALID;
 			continue;
 		}
 		break;
 	}
 
-	if (Addrs != nullptr)
+	if (Addrs != NULL)
 		freeaddrinfo(Addrs);
 	return s;
 }
 
-static int ConnConnectTCP(
+
+static int ConnConnectTCPWait(LqHandle s, const struct sockaddr* name, int namelen, long wait_sec) {
+	fd_set writefds, errfds;
+	struct timeval timeout;
+	int res, opt;
+
+
+	LqConnSwitchNonBlock(s, 1);
+
+	if ((res = connect(s, name, namelen)) < 0) {
+		if (LqConnIsWouldBlock()) {
+			FD_ZERO(&writefds);
+			FD_ZERO(&errfds);
+			FD_SET(s, &writefds);
+			FD_SET(s, &errfds);
+			timeout.tv_sec = wait_sec;
+			timeout.tv_usec = 0;
+			res = select(s + 1, NULL, &writefds, &errfds, &timeout);//res == 0 is timeout
+			if (FD_ISSET(s, &errfds))
+				res = -1;
+		}
+	} else {
+		res = 1;
+	}
+	LqConnSwitchNonBlock(s, 0);
+
+	if (res < 1)
+		return -1;
+
+	socklen_t len = sizeof(opt);
+	if (getsockopt(s, SOL_SOCKET, SO_ERROR, (char*)&opt, &len) < 0) {
+		return -1;
+	}
+	return opt ? -1 : 0;
+}
+
+static LqHandle ConnConnectTCP(
 	const char* Address,
 	const char* Port
 ) {
-	int s = -1;
+	LqHandle s = LQ_HANDLE_INVALID;
 	addrinfo hi = { 0 }, *ah = nullptr, *i;
 
 	hi.ai_family = AF_UNSPEC;
@@ -228,22 +276,18 @@ static int ConnConnectTCP(
 	hi.ai_protocol = IPPROTO_TCP; // IPPROTO_TCP;
 	hi.ai_flags = 0;//AI_ALL;
 
-	int res;
-	if ((res = getaddrinfo(((Address != NULL) && (*Address != '\0')) ? Address : (const char*)NULL, Port, &hi, &ah)) != 0) {
-		return -1;
+	if (getaddrinfo(((Address != NULL) && (*Address != '\0')) ? Address : (const char*)NULL, Port, &hi, &ah) != 0) {
+		return LQ_HANDLE_INVALID;
 	}
 
 	for (i = ah; i != NULL; i = i->ai_next) {
-		if ((s = socket(i->ai_family, i->ai_socktype, i->ai_protocol)) == -1)
+		if (LqHandleIsInvalid(s = socket(i->ai_family, i->ai_socktype, i->ai_protocol)))
 			continue;
-		if (connect(s, i->ai_addr, i->ai_addrlen) != -1)
+		LqConnSwitchNonBlock(s, 1);
+		if (ConnConnectTCPWait(s, i->ai_addr, i->ai_addrlen, DOH_WAIT_CONNECT_SEC) != -1)
 			break;
-		closesocket(s);
-	}
-	if (i == NULL) {
-		if (ah != NULL)
-			freeaddrinfo(ah);
-		return -1;
+		LqHandleClose(s);
+		s = LQ_HANDLE_INVALID;
 	}
 	if (ah != NULL)
 		freeaddrinfo(ah);
@@ -253,7 +297,7 @@ static int ConnConnectTCP(
 
 int CountServers = 0;
 int CountWorkers = 2;
-int UDPSocket = -1;
+LqHandle UDPSocket = LQ_HANDLE_INVALID;
 Worker** Workers = NULL;
 HttpsServerInfo* ServersInfo = NULL;
 LqTimeMillisec DisconnectWaitTime = 12000; //12 seconds
@@ -263,6 +307,7 @@ volatile std::atomic<bool> IsStopService(false);
 int CountRspHosts = 0;
 ResponceHost* RspHosts = NULL;
 char*SSL_CACertFileForVerify = NULL;
+LqLocker<unsigned> ssl_ctx_locker;
 
 
 //Service
@@ -584,11 +629,13 @@ static unsigned __stdcall WorkerProc(void* data) {
 	Worker* Wrk = (Worker*)data;
 
 	SSL* ssl = NULL;
-	int Socket = -1;
+	LqHandle Socket = LQ_HANDLE_INVALID;
 	LqTimeMillisec WaitTime = INFINITE;
 	int CountFds = 1;
 	LqPoll Fds[2];
 	DnsReq* CurTsk = NULL;
+	SSL_CTX* ssl_ctx = NULL;
+
 	Fds[0].fd = Wrk->Event;
 	Fds[0].events = LQ_POLLIN;
 	int QueryStringLen = strlen(Wrk->ServerInfo->Query);
@@ -651,6 +698,49 @@ static unsigned __stdcall WorkerProc(void* data) {
 	const int HostStringLen = strlen(HostString);
 	const int PathStringLen = strlen(PathString);
 
+	ssl_ctx_locker.LockWriteYield();
+
+	ssl_ctx = SSL_CTX_new(SSLv23_client_method());
+	if (ssl_ctx == NULL) {
+		OutputDebugString(TEXT("DOH_Windows: Cannot create SSL_CTX"));
+		DbgConsolePrintf("Cannot create SSL_CTX");
+		ssl_ctx_locker.UnlockWrite();
+		goto lbl_err_ssl_ctx_not_created;
+	}
+	bool IsVerifyCA = true;
+	SSL_CTX_set_default_verify_paths(ssl_ctx);
+	DbgCheckHeap();
+	if (SSL_CACertFileForVerify != NULL) {
+		if (SSL_CTX_load_verify_locations(ssl_ctx, SSL_CACertFileForVerify, NULL) != 1) {
+			OutputDebugString(TEXT("DOH_Windows: SSL SSL_CTX_load_verify_locations() returned 0, PEM file cert for verify not used"));
+			DbgConsolePrintf("SSL_CTX_load_verify_locations() returned 0, PEM file cert for verify not used\n");
+			IsVerifyCA = false;
+		}
+	}
+	else {
+		//Used for not get X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY error from SSL_get_verify_result()
+		X509_STORE* Store = SSL_CTX_get_cert_store(ssl_ctx);
+		if (Store == NULL) {
+			IsVerifyCA = false;
+			DbgConsolePrintf("SSL_CTX_get_cert_store() returned NULL, cert verify not used\n");
+			OutputDebugString(TEXT("DOH_Windows: SSL SSL_CTX_get_cert_store() returned NULL, cert verify not used"));
+		}
+		else {
+			if (!SetWindowsSSLStoreCerts(Store)) {
+				IsVerifyCA = false;
+				DbgConsolePrintf("Cannot set local windows root certs, cert verify not used\n");
+				OutputDebugString(TEXT("DOH_Windows: SSL Cannot set local windows root certs, cert verify not used"));
+			}
+		}
+	}
+
+	ssl_ctx_locker.UnlockWrite();
+
+	if (IsVerifyCA) {
+		OutputDebugString(TEXT("DOH_Windows: SSL cert verification is used"));
+		DbgConsolePrintf("SSL cert verification is used");
+	}
+
 	OutputDebugString(TEXT("DOH_Windows: enter worker proc main loop"));
 	for (;;) {
 		DbgCheckHeap();
@@ -660,20 +750,20 @@ static unsigned __stdcall WorkerProc(void* data) {
 			DbgConsolePrintf("Event recived %s\n", Wrk->ServerInfo->Ip);
 
 			LqEventReset(Fds[0].fd);
-			if ((Wrk->StartTsk != NULL) && (Socket == -1)) { //???? ???? ?????????? ? HTTPS ????????, ??????????
+			if ((Wrk->StartTsk != NULL) && (LqHandleIsInvalid(Socket))) { //???? ???? ?????????? ? HTTPS ????????, ??????????
 				Socket = ConnConnectTCP(Wrk->ServerInfo->Ip, Wrk->ServerInfo->Port);
-				if (Socket == -1) {
+				if (LqHandleIsInvalid(Socket)) {
 					DbgConsolePrintf("Conn error %s\n", Wrk->ServerInfo->Ip);
 					OutputDebugString(TEXT("DOH_Windows: ConnConnectTCP returned -1. Maybe net unreacheble"));
 					goto lblPollHup;
 				}
-				ssl = SSL_new(Wrk->ssl_ctx);
+				ssl = SSL_new(ssl_ctx);
 
 				if (SSL_set_fd(ssl, Socket) == 0) {
 					goto lblPollHup;
 				}
 
-				if (Wrk->IsVerifyCA) {
+				if (IsVerifyCA) {
 					SSL_set_hostflags(ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
 					if (!SSL_set1_host(ssl, HostString)) {
 						goto lblPollHup;
@@ -681,10 +771,12 @@ static unsigned __stdcall WorkerProc(void* data) {
 				}
 				int SslConnectRes;
 				if ((SslConnectRes = SSL_connect(ssl)) < 0) {
+					DbgConsolePrintf("Not connected or SSL handshake error %s\n", Wrk->ServerInfo->Ip);
+					OutputDebugString(TEXT("DOH_Windows: SSL_connect() < 0. Conn error, not have SSL handshake"));
 					goto lblPollHup;
 				}
 
-				if (Wrk->IsVerifyCA) {
+				if (IsVerifyCA) {
 					long VerRes = SSL_get_verify_result(ssl);
 					if (VerRes != X509_V_OK) {//X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY
 						char Buf[500];
@@ -735,7 +827,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 					*/
 
 					if ((SendBufferPos + CurTsk->BufLen + sizeof(uint16_t)) > SendBufferSize) { //If queue very hight
-						goto Continue4;
+						break;
 					}
 
 					*((uint16_t*)(SendBuffer + SendBufferPos)) = htons(CurTsk->BufLen);
@@ -750,7 +842,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 					//	goto Continue4;
 					//}
 					if ((SendBufferPos + 256 + HostStringLen + PathStringLen + CurTsk->BufLen) > SendBufferSize) { //If queue very hight
-						goto Continue4;
+						break;
 					}
 					int WrittenInBuf = snprintf(
 						SendBuffer + SendBufferPos,
@@ -767,7 +859,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 						//Base64Buf,
 						HostString,
 						(int)CurTsk->BufLen
-						);
+					);
 					SendBufferPos += WrittenInBuf;
 					memcpy(SendBuffer + SendBufferPos, CurTsk->Buf, CurTsk->BufLen);
 					SendBufferPos += CurTsk->BufLen;
@@ -780,9 +872,6 @@ static unsigned __stdcall WorkerProc(void* data) {
 				Wrk->CurTsk = Wrk->CurTsk->PrevTsk;
 				Wrk->TskLoker.UnlockWrite();
 			}
-
-
-		Continue4:;
 		}
 		if ((CountFds > 1) && ((Fds[1].revents & LQ_POLLOUT) || (SendBufferPos > 0))) { //Is need send data via socket
 			if (SendBufferPos > 0) {
@@ -968,9 +1057,9 @@ static unsigned __stdcall WorkerProc(void* data) {
 				SSL_free(ssl);
 				ssl = NULL;
 			}
-			if (Socket != -1) {
-				closesocket(Socket);
-				Socket = -1;
+			if (!LqHandleIsInvalid(Socket)) {
+				LqHandleClose(Socket);
+				Socket = LQ_HANDLE_INVALID;
 			}
 			WaitTime = INFINITE;
 			CountFds = 1;
@@ -1011,6 +1100,14 @@ static unsigned __stdcall WorkerProc(void* data) {
 	Wrk->EndTsk = NULL;
 	Wrk->TskLen = 0;
 	Wrk->TskLoker.UnlockWrite();
+
+lbl_err_ssl_ctx_not_created:
+	if (ssl_ctx != NULL) {
+		ssl_ctx_locker.LockWriteYield();
+		SSL_CTX_free(ssl_ctx);
+		ssl_ctx_locker.UnlockWrite();
+		ssl_ctx = NULL;
+	}
 
 	OutputDebugString(TEXT("DOH_Windows: WorkerProc memory free"));
 	free(QueryString);
@@ -1087,55 +1184,12 @@ static unsigned __stdcall MainDOH(void* data) {
 	SSL_load_error_strings();
 	SSL_library_init();
 
-	SSL_CTX* ctx = SSL_CTX_new(SSLv23_client_method());
-	if (ctx == NULL) {
-		OutputDebugString(TEXT("DOH_Windows: Cannot create SSL_CTX"));
-		DbgConsolePrintf("Cannot create SSL_CTX");
-		goto lblOut;
-	}
-	bool IsVerifyCA = true;
-	SSL_CTX_set_default_verify_paths(ctx);
-	DbgCheckHeap();
-	if (SSL_CACertFileForVerify != NULL) {
-		if (SSL_CTX_load_verify_locations(ctx, SSL_CACertFileForVerify, NULL) != 1) {
-			OutputDebugString(TEXT("DOH_Windows: SSL SSL_CTX_load_verify_locations() returned 0, PEM file cert for verify not used"));
-			DbgConsolePrintf("SSL_CTX_load_verify_locations() returned 0, PEM file cert for verify not used\n");
-			IsVerifyCA = false;
-		}
-	} else {
-		//Used for not get X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY error from SSL_get_verify_result()
-		X509_STORE* Store = SSL_CTX_get_cert_store(ctx);
-		if (Store == NULL) {
-			IsVerifyCA = false;
-			DbgConsolePrintf("SSL_CTX_get_cert_store() returned NULL, cert verify not used\n");
-			OutputDebugString(TEXT("DOH_Windows: SSL SSL_CTX_get_cert_store() returned NULL, cert verify not used"));
-		} else {
-			if (!SetWindowsSSLStoreCerts(Store)) {
-				IsVerifyCA = false;
-				DbgConsolePrintf("Cannot set local windows root certs, cert verify not used\n");
-				OutputDebugString(TEXT("DOH_Windows: SSL Cannot set local windows root certs, cert verify not used"));
-			}
-		}
-	}
-
-	if (IsVerifyCA) {
-		char Buf[500];
-		//SSL_CTX_set_verify(ctx, SSL_VERIFY_PEER, NULL);
-		snprintf(
-			Buf,
-			sizeof(Buf),
-			"DOH_Windows: SSL cert verification is used"
-			);
-		OutputDebugStringA(Buf);
-		DbgConsolePrintf("SSL cert verification is used");
-	}
-
 	DbgCheckHeap();
 
 
 	OutputDebugString(TEXT("DOH_Windows: SSL_library_init() executed"));
 	UDPSocket = ConnBindUDP(LocalAddress, LocalPort, 1024);
-	if (UDPSocket == -1) {
+	if (LqHandleIsInvalid(UDPSocket)) {
 		OutputDebugString(TEXT("DOH_Windows: Error not binded to UDP port"));
 		goto lblOut;
 	}
@@ -1144,8 +1198,8 @@ static unsigned __stdcall MainDOH(void* data) {
 	CountWorkers = max(CountWorkers, CountServers);
 	if (CountServers < 1) {
 		OutputDebugString(TEXT("DOH_Windows: DOH_Main() Error CountServers < 1"));
-		closesocket(UDPSocket);
-		UDPSocket = -1;
+		LqHandleClose(UDPSocket);
+		UDPSocket = LQ_HANDLE_INVALID;
 		goto lblOut;
 	}
 
@@ -1160,8 +1214,6 @@ static unsigned __stdcall MainDOH(void* data) {
 		Wrk->IsEndWork.store(false);
 		Wrk->Event = LqEventCreate(1);
 		Wrk->ServerInfo = &(ServersInfo[i % CountServers]);
-		Wrk->IsVerifyCA = IsVerifyCA;
-		Wrk->ssl_ctx = ctx;
 		uintptr_t Handler = _beginthreadex(NULL, 0, WorkerProc, Wrk, 0, &Wrk->ThreadId);
 		Wrk->ThreadHandle = (HANDLE)Handler;
 	}
@@ -1188,8 +1240,8 @@ static unsigned __stdcall MainDOH(void* data) {
 		}
 		
 		if (res <= 0) {
-			//if (UDPSocket != -1)
-			//closesocket(UDPSocket);
+			//if (!LqHandleIsInvalid(UDPSocket))
+			//LqHandleClose(UDPSocket);
 			//UDPSocket = ConnBindUDP(LocalAddress, LocalPort, 1024);
 			//Sleep(500);
 			goto lblContinue5;
@@ -1293,7 +1345,7 @@ lblOut:
 			LqEventSet(Workers[i]->Event);
 			WaitForSingleObject(Workers[i]->ThreadHandle, INFINITE);
 			CloseHandle(Workers[i]->ThreadHandle);
-			LqFileClose(Workers[i]->Event);
+			LqHandleClose(Workers[i]->Event);
 			LqFastAlloc::Delete(Workers[i]);
 			OutputDebugString(TEXT("DOH_Windows: Worker stopped"));
 		}
@@ -1342,10 +1394,6 @@ lblOut:
 		free(RspHosts);
 	}
 
-	if (ctx != NULL) {
-		SSL_CTX_free(ctx);
-	}
-
 	UpdateServiceStatus(SERVICE_STOPPED);
 	OutputDebugString(TEXT("DOH_Windows: Service return from MainDOH()"));
 	return 0;
@@ -1358,16 +1406,16 @@ static DWORD WINAPI ServiceHandler(DWORD dwControl) {
 		OutputDebugString(TEXT("DOH_Windows: Runing ServiceHandler(SERVICE_CONTROL_STOP)"));
 		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
 		IsStopService.store(true);
-		if (UDPSocket != -1) {
-			closesocket(UDPSocket);
+		if (!LqHandleIsInvalid(UDPSocket)) {
+			LqHandleClose(UDPSocket);
 		}
 		break;
 	case SERVICE_CONTROL_SHUTDOWN:
 		OutputDebugString(TEXT("DOH_Windows: Runing ServiceHandler(SERVICE_CONTROL_SHUTDOWN)"));
 		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
 		IsStopService.store(true);
-		if (UDPSocket != -1) {
-			closesocket(UDPSocket);
+		if (!LqHandleIsInvalid(UDPSocket)) {
+			LqHandleClose(UDPSocket);
 		}
 		break;
 	case SERVICE_CONTROL_PAUSE:
@@ -1390,24 +1438,76 @@ static DWORD WINAPI ServiceHandler(DWORD dwControl) {
 	return NO_ERROR;
 }
 
-#ifdef DOH_CONSOLE_DBG
+extern "C" __declspec(dllexport) VOID WINAPI ServiceMain(DWORD argc, LPTSTR argv[]) {
+	OutputDebugString(TEXT("DOH_Windows: Start ServiceMain()"));
 
-int main() {
+	serviceStatusHandle = RegisterServiceCtrlHandlerW(SVCNAME, (LPHANDLER_FUNCTION)ServiceHandler);
+
+	UpdateServiceStatus(SERVICE_START_PENDING);
+	//unsigned int ThreadId = 0;
+	//_beginthreadex(NULL, 0, MainDOH, NULL, 0, &ThreadId);
 	MainDOH(NULL);
-	return 0;
 }
 
-#endif
+extern "C" __declspec(dllexport) VOID WINAPI InstallService() {
+	HKEY hKey;
+	DWORD dwType = REG_MULTI_SZ, cbData;
+	char Buf[2048];
+	/*
+		in 32 or 64 bit values in reg may be not shared
+	*/
+	
+	OutputDebugString(TEXT("DOH_Windows: Start InstallService()"));
 
-extern "C" __declspec(dllexport) VOID WINAPI ServiceMain(DWORD argc, LPTSTR argv[]) {
+	LSTATUS Ret = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost", 0, KEY_READ | KEY_SET_VALUE | KEY_WRITE, &hKey);
+	if (Ret != ERROR_SUCCESS) {
+		OutputDebugString(TEXT("DOH_Windows: RegOpenKeyExW() Cannot open Svchost reg key"));
+		return;
+	}
+
+	cbData = sizeof(Buf);
+
+	Ret = RegGetValueW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost", L"NetworkService", RRF_RT_REG_MULTI_SZ, &dwType, Buf, &cbData);
+	if (Ret != ERROR_SUCCESS) {
+		OutputDebugString(TEXT("DOH_Windows: RegQueryValueExW() Cannot open NetworkService reg value"));
+		return;
+	}
+	for (wchar_t* c = (wchar_t*)Buf, *m = (wchar_t*)(Buf + cbData); c < m;) {
+		if (wcsicmp(SVCNAME, c) == 0) {
+			OutputDebugString(TEXT("DOH_Windows: wcsicmp() has been added service"));
+			return;
+		}
+		OutputDebugStringW((LPCWSTR)c);
+		c += (wcslen(c) + 1);
+	}
+
+	memmove(Buf + sizeof(SVCNAME), Buf, cbData);
+	memcpy(Buf, SVCNAME, sizeof(SVCNAME));
+	cbData += sizeof(SVCNAME);
+	Ret = RegSetValueExW(hKey, L"NetworkService", NULL, dwType, (LPBYTE)Buf, cbData);
+	if (Ret != ERROR_SUCCESS) {
+		OutputDebugString(TEXT("DOH_Windows: RegSetValueExW() Reg value NetworkService not setted"));
+	} else {
+		OutputDebugString(TEXT("DOH_Windows: RegSetValueExW() Reg value NetworkService has been setted"));
+	}
+}
+
+extern "C" __declspec(dllexport) VOID WINAPI SetFailureActions() {
 	SC_HANDLE ScManngerHandle;
 	SC_HANDLE CurService;
 	SERVICE_FAILURE_ACTIONSW servFailActions;
 	SC_ACTION failActions[3];
+	BOOL IsServiceConfigSet = FALSE;
+	static BYTE FailureActionsRestartBytes[] = {
+		0x80,0x51,0x01,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00,
+		0x03,0x00,0x00,0x00,0x14,0x00,0x00,0x00,0x01,0x00,0x00,0x00,
+		0xe8,0x03,0x00,0x00,0x01,0x00,0x00,0x00,0xe8,0x03,0x00,0x00,
+		0x01,0x00,0x00,0x00,0xe8,0x03,0x00,0x00
+	};
+	HKEY hKey;
+	LSTATUS RegRet;
 
-	OutputDebugString(TEXT("DOH_Windows: Start ServiceMain()"));
-
-	serviceStatusHandle = RegisterServiceCtrlHandlerW(SVCNAME, (LPHANDLER_FUNCTION)ServiceHandler);
+	OutputDebugString(TEXT("DOH_Windows: Start SetFailureActions()"));
 
 	failActions[0].Type = SC_ACTION_RESTART; //Failure action: Restart Service
 	failActions[0].Delay = 1000; //number of milliseconds to wait before performing failure action = 2minutes
@@ -1421,63 +1521,52 @@ extern "C" __declspec(dllexport) VOID WINAPI ServiceMain(DWORD argc, LPTSTR argv
 	servFailActions.lpRebootMsg = NULL; //Message during rebooting computer due to service failure, not used
 	servFailActions.cActions = 3; // Number of failure action to manage
 	servFailActions.lpsaActions = failActions;
-	ScManngerHandle = OpenSCManagerW(NULL, NULL, SC_MANAGER_ALL_ACCESS);
-	CurService = OpenServiceW(ScManngerHandle, SVCNAME, SC_MANAGER_ALL_ACCESS);
 
+	OutputDebugString(TEXT("DOH_Windows: Trying set FailureActions via ChangeServiceConfig2W()"));
 
-	ChangeServiceConfig2W(CurService, SERVICE_CONFIG_FAILURE_ACTIONS, &servFailActions); //Apply above settings
-	CloseServiceHandle(CurService);
-	CloseServiceHandle(ScManngerHandle);
-
-	UpdateServiceStatus(SERVICE_START_PENDING);
-	//unsigned int ThreadId = 0;
-	//_beginthreadex(NULL, 0, MainDOH, NULL, 0, &ThreadId);
-	MainDOH(NULL);
-}
-
-
-extern "C" __declspec(dllexport) VOID WINAPI InstallService() {
-	OutputDebugString(TEXT("DOH_Windows: Start InstallService()"));
-
-	HKEY hKey;
-	DWORD dwType, cbData;
-	char Buf[1024];
-	wchar_t* wBuf = (wchar_t*)Buf;
-	LSTATUS Ret = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion\\Svchost", 0, KEY_READ | KEY_SET_VALUE | KEY_WRITE, &hKey);
-	if (Ret != ERROR_SUCCESS) {
-		OutputDebugString(TEXT("DOH_Windows: RegOpenKeyExW() Cannot open Svchost reg key"));
-		return;
-	}
-
-	cbData = sizeof(Buf);
-	Ret = RegQueryValueExW(hKey, L"NetworkService", NULL, &dwType, (LPBYTE)Buf, &cbData);
-	if (Ret != ERROR_SUCCESS) {
-		OutputDebugString(TEXT("DOH_Windows: RegQueryValueExW() Cannot open NetworkService reg value"));
-		return;
-	}
-	for (wchar_t* c = wBuf, *m = (wchar_t*)(((char*)wBuf) + cbData); c < m; c++) {
-		int len = wcslen(c);
-		if (wcsicmp(L"DOH_Windows", c) == 0) {
-			OutputDebugString(TEXT("DOH_Windows: wcsicmp() has been added service"));
-			return;
+	ScManngerHandle = OpenSCManagerW(NULL, NULL, SC_MANAGER_CONNECT);
+	if (ScManngerHandle == NULL) {
+		OutputDebugString(TEXT("DOH_Windows: OpenSCManagerW() == NULL Cannot set restart settings"));
+	} else {
+		CurService = OpenServiceW(ScManngerHandle, SVCNAME, SERVICE_CHANGE_CONFIG | SERVICE_START);
+		if (CurService == NULL) {
+			OutputDebugString(TEXT("DOH_Windows: OpenServiceW() == NULL Cannot set restart settings"));
+		} else {
+			if (!ChangeServiceConfig2W(CurService, SERVICE_CONFIG_FAILURE_ACTIONS, &servFailActions)) { //Apply above settings
+				OutputDebugString(TEXT("DOH_Windows: ChangeServiceConfig2W() == FALSE Cannot set restart settings"));
+			} else {
+				OutputDebugString(TEXT("DOH_Windows: ChangeServiceConfig2W() complited"));
+				IsServiceConfigSet = TRUE;
+			}
+			CloseServiceHandle(CurService);
 		}
-		OutputDebugStringW((LPCWSTR)c);
-		c += len;
+		CloseServiceHandle(ScManngerHandle);
 	}
-
-	memmove(Buf + sizeof(L"DOH_Windows"), Buf, cbData);
-	memcpy(Buf, L"DOH_Windows", sizeof(L"DOH_Windows"));
-	cbData += sizeof(L"DOH_Windows");
-	Ret = RegSetValueExW(hKey, L"NetworkService", NULL, dwType, (BYTE*)Buf, cbData);
-	if (Ret != ERROR_SUCCESS) {
-		OutputDebugString(TEXT("DOH_Windows: RegSetValueExW() Reg value NetworkService not setted"));
-	}
-	else {
-		OutputDebugString(TEXT("DOH_Windows: RegSetValueExW() Reg value NetworkService has been setted"));
+	if (!IsServiceConfigSet) {
+		OutputDebugString(TEXT("DOH_Windows: Trying set FailureActions in registery"));
+		RegRet = RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"SYSTEM\\CurrentControlSet\\Services\\DOH_Windows", 0, KEY_READ | KEY_SET_VALUE | KEY_WRITE, &hKey);
+		if (RegRet != ERROR_SUCCESS) {
+			OutputDebugString(TEXT("DOH_Windows: RegOpenKeyExW() Cannot open DOH_Windows reg key"));
+		} else {
+			RegRet = RegSetValueExW(hKey, L"FailureActions", NULL, REG_BINARY, (BYTE*)FailureActionsRestartBytes, sizeof(FailureActionsRestartBytes));
+			if (RegRet != ERROR_SUCCESS) {
+				OutputDebugString(TEXT("DOH_Windows: RegSetValueExW() Cannot set FailureActions via reg key"));
+			} else {
+				OutputDebugString(TEXT("DOH_Windows: RegSetValueExW() FailureActions via reg key has been setted"));
+			}
+			RegCloseKey(hKey);
+		}
 	}
 }
 
+#ifdef DOH_CONSOLE_DBG
 
+int main() {
+	MainDOH(NULL);
+	return 0;
+}
+
+#endif
 
 
 #define __METHOD_DECLS__

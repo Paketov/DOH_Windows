@@ -46,8 +46,20 @@
 
 
 
-
-
+#if defined(LQPLATFORM_WINDOWS)
+# if defined(LQARCH_32)
+typedef unsigned int LqHandle;
+#  define LQ_HANDLE_INVALID ((LqHandle)(long)-1)
+# else
+typedef unsigned long long LqHandle;
+#  define LQ_HANDLE_INVALID ((LqHandle)(long long)-1)
+# endif
+inline int LqHandleIsInvalid(LqHandle fd) { return (fd == LQ_HANDLE_INVALID) || (fd == ((LqHandle)0)); }
+#else
+typedef int LqHandle;
+# define LQ_HANDLE_INVALID (-1)
+inline int LqHandleIsInvalid(LqHandle fd) { return fd == LQ_HANDLE_INVALID; }
+#endif
 
 typedef uint16_t                LqEvntFlag;
 
@@ -96,31 +108,31 @@ typedef long long               LqTimeMillisec;
 #pragma pack(1)
 
 typedef struct LqPoll {
-	int   fd;         /* file descriptor */
+	LqHandle   fd;         /* file descriptor */
 	short events;     /* requested events */
 	short revents;    /* returned events */
 } LqPoll;
 
 #pragma pack(pop)
 
-int LqDescrSetInherit(int Descriptor, int IsInherit);
+int LqHandleSetInherit(LqHandle Descriptor, int IsInherit);
 
-int LqConnSwitchNonBlock(int Fd, int IsNonBlock);
+int LqConnSwitchNonBlock(LqHandle Fd, int IsNonBlock);
 
-bool LqDescrIsSocket(int Fd);
+int LqHandleIsSocket(LqHandle Fd);
 
-bool LqDescrIsTerminal(int Fd);
+int LqHandleIsTerminal(LqHandle Fd);
 
-int LqEventCreate(int InheritFlag);
+LqHandle LqEventCreate(int InheritFlag);
 
-int LqEventSet(int FileEvent);
+int LqEventSet(LqHandle FileEvent);
 
-int LqEventReset(int FileEvent);
+int LqEventReset(LqHandle FileEvent);
 
 void LqThreadYield();
 
-int LqFileClose(int Fd);
+int LqHandleClose(LqHandle Fd);
 
 int LqPollCheck(LqPoll* Fds, size_t CountFds, LqTimeMillisec TimeoutMillisec);
 
-short LqPollCheckSingle(int Fd, short Events, LqTimeMillisec TimeoutMillisec);
+short LqPollCheckSingle(LqHandle Fd, short Events, LqTimeMillisec TimeoutMillisec);

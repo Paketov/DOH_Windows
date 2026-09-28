@@ -3,7 +3,7 @@ CountWorkers:
 DisconnectWaitTime:
  20000
 LocalAddress:
- 127.0.0.1 53
+ ::ffff:127.0.0.1 53 #127.0.0.1 53
 DOHServers:
  8.8.8.8 443 https://dns.google/dns-query #Traffic via DOH by default
  DOT 149.112.112.112 853 dns.quad9.net  #Traffic via DOT(DNS over TLS)

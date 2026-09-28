@@ -98,16 +98,22 @@ extern "C" __kernel_entry NTSTATUS NTAPI NtReadFile(
 	);
 
 
-int LqDescrSetInherit(int Descriptor, int IsInherit) {
+int LqHandleSetInherit(LqHandle Descriptor, int IsInherit) {
 	return (SetHandleInformation((HANDLE)Descriptor, HANDLE_FLAG_INHERIT, IsInherit) == TRUE) ? 0 : -1;
 }
 
-bool LqDescrIsTerminal(int Fd) {
+int LqHandleIsTerminal(LqHandle Fd) {
 	DWORD Mode;
 	return GetConsoleMode((HANDLE)Fd, &Mode) == TRUE;
 }
 
-int LqEventCreate(int InheritFlag) {
+int LqHandleClose(LqHandle Fd) {
+	if (LqHandleIsSocket(Fd))
+		return (closesocket(Fd) == 0) ? 0 : -1;
+	return (NtClose((HANDLE)Fd) == TRUE) ? 0 : -1;
+}
+
+LqHandle LqEventCreate(int InheritFlag) {
 	OBJECT_ATTRIBUTES Attr;
 	HANDLE h;
 	NTSTATUS Stat;
@@ -116,24 +122,20 @@ int LqEventCreate(int InheritFlag) {
 	Stat = NtCreateEvent(&h, EVENT_ALL_ACCESS, &Attr, NotificationEvent, FALSE);
 	if (!NT_SUCCESS(Stat)) {
 		SetLastError(RtlNtStatusToDosError(Stat));
-		return -1;
+		return LQ_HANDLE_INVALID;
 	}
-	return (int)h;
+	return (LqHandle)h;
 }
 
-int LqEventSet(int FileEvent) {
+int LqEventSet(LqHandle FileEvent) {
 	return (NtSetEvent((HANDLE)FileEvent, NULL) == STATUS_SUCCESS) ? 0 : -1;
 }
 
-int LqEventReset(int FileEvent) {
+int LqEventReset(LqHandle FileEvent) {
 	LONG PrevVal = 0;
 	if (NtResetEvent((HANDLE)FileEvent, &PrevVal) != STATUS_SUCCESS)
 		return -1;
 	return PrevVal ? 1 : 0;
-}
-
-int LqFileClose(int Fd) {
-	return (NtClose((HANDLE)Fd) == TRUE) ? 0 : -1;
 }
 
 void LqThreadYield() {
@@ -151,8 +153,7 @@ static DWORD CheckAllEvents(const HANDLE* EventObjs, const intptr_t EventsCount)
 		Status = WaitForMultipleObjects(Count, EventObjs + StartIndex, FALSE, 0);
 		if ((Status >= WAIT_OBJECT_0) && (Status < (WAIT_OBJECT_0 + MAXIMUM_WAIT_OBJECTS))) {
 			return Status;
-		}
-		else if (Status != WAIT_TIMEOUT) {
+		} else if (Status != WAIT_TIMEOUT) {
 			return Status;
 		}
 		StartIndex += Count;
@@ -187,7 +188,7 @@ int LqPollCheck(LqPoll* Fds, size_t CountFds, LqTimeMillisec TimeoutMillisec) {
 	Types = (uint8_t*)(Handles + CountFds);
 	for (size_t i = 0; i < CountFds; i++) {
 		Fds[i].revents = 0;
-		if (LqDescrIsSocket(Fds[i].fd)) {
+		if (LqHandleIsSocket(Fds[i].fd)) {
 			Types[i] = LQ_POLL_TYPE_SOCKET;
 			Handles[i] = CreateEventW(NULL, TRUE, FALSE, NULL);
 			WSAEventSelect(Fds[i].fd, Handles[i], LqEvntSystemEventByConnFlag(Fds[i].events));
@@ -198,7 +199,7 @@ int LqPollCheck(LqPoll* Fds, size_t CountFds, LqTimeMillisec TimeoutMillisec) {
 				CloseHandle(Handles[i]);
 				Handles[i] = (HANDLE)Fds[i].fd;
 			}
-		} else if (LqDescrIsTerminal(Fds[i].fd)) {
+		} else if (LqHandleIsTerminal(Fds[i].fd)) {
 			Types[i] = LQ_POLL_TYPE_TERMINAL;
 			HavePipeOrTerminal = true;
 			if (Fds[i].events & LQ_POLLIN) {
@@ -486,7 +487,7 @@ lblOut:
 
 #include "LqAlloc.hpp"
 
-int LqDescrSetInherit(int Descriptor, int IsInherit) {
+int LqHandleSetInherit(LqHandle Descriptor, int IsInherit) {
 	auto Val = fcntl(Descriptor, F_GETFD);
 	if (Val < 0)
 		return -1;
@@ -494,14 +495,14 @@ int LqDescrSetInherit(int Descriptor, int IsInherit) {
 }
 
 
-bool LqDescrIsTerminal(int Fd) {
+int LqHandleIsTerminal(LqHandle Fd) {
 	return isatty(Fd) == 1;
 }
 
-int LqEventCreate(int InheritFlag) {
-	int Res = syscall(SYS_eventfd, (unsigned int)0, (int)0);
+LqHandle LqEventCreate(int InheritFlag) {
+	LqHandle Res = syscall(SYS_eventfd, (unsigned int)0, (int)0);
 	if (Res == -1)
-		return -1;
+		return LQ_HANDLE_INVALID;
 	fcntl(Res, F_SETFL, fcntl(Res, F_GETFL, 0) | O_NONBLOCK);
 	if (InheritFlag & LQ_O_NOINHERIT)
 		fcntl(Res, F_SETFD, fcntl(Res, F_GETFD) | FD_CLOEXEC);
@@ -510,25 +511,23 @@ int LqEventCreate(int InheritFlag) {
 
 
 
-int LqEventSet(int FileEvent) {
+int LqEventSet(LqHandle FileEvent) {
 	eventfd_t r = 1;
 	return (write(FileEvent, &r, sizeof(r)) > 0) ? 0 : -1;
 }
 
 
 
-int LqEventReset(int FileEvent) {
+int LqEventReset(LqHandle FileEvent) {
 	eventfd_t r[20];
 	return (read(FileEvent, &r, sizeof(r)) > 0) ? 1 : 0;
 }
-
-
 
 void LqThreadYield() {
 	usleep(0);
 }
 
-int LqFileClose(int Fd) {
+int LqHandleClose(LqHandle Fd) {
 	return close(Fd);
 }
 
@@ -540,7 +539,7 @@ int LqPollCheck(LqPoll* Fds, size_t CountFds, LqTimeMillisec TimeoutMillisec) {
 #endif
 
 
-short LqPollCheckSingle(int Fd, short Events, LqTimeMillisec TimeoutMillisec) {
+short LqPollCheckSingle(LqHandle Fd, short Events, LqTimeMillisec TimeoutMillisec) {
 	LqPoll Poll;
 	Poll.fd = Fd;
 	Poll.events = Events;
@@ -550,10 +549,10 @@ short LqPollCheckSingle(int Fd, short Events, LqTimeMillisec TimeoutMillisec) {
 	return 0;
 }
 
-int LqConnSwitchNonBlock(int Fd, int IsNonBlock) {
+int LqConnSwitchNonBlock(LqHandle Fd, int IsNonBlock) {
 #ifdef LQPLATFORM_WINDOWS
 	u_long nonBlocking = IsNonBlock;
-	if (ioctlsocket(Fd, FIONBIO, &nonBlocking) == -1)
+	if (ioctlsocket((SOCKET)Fd, FIONBIO, &nonBlocking) == -1)
 		return -1;
 #else
 	auto Flags = fcntl(Fd, F_GETFL, 0);
@@ -563,10 +562,10 @@ int LqConnSwitchNonBlock(int Fd, int IsNonBlock) {
 	return 0;
 }
 
-bool LqDescrIsSocket(int Fd) {
+int LqHandleIsSocket(LqHandle Fd) {
 	int val;
 	socklen_t len = sizeof(val);
-	return getsockopt(Fd, SOL_SOCKET, SO_ACCEPTCONN, (char*)&val, &len) != -1;
+	return getsockopt((SOCKET)Fd, SOL_SOCKET, SO_REUSEADDR, (char*)&val, &len) != -1;
 }
 
 
