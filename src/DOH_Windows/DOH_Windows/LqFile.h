@@ -133,6 +133,8 @@ void LqThreadYield();
 
 int LqHandleClose(LqHandle Fd);
 
+int LqConnClose(LqHandle Sock);
+
 int LqPollCheck(LqPoll* Fds, size_t CountFds, LqTimeMillisec TimeoutMillisec);
 
 short LqPollCheckSingle(LqHandle Fd, short Events, LqTimeMillisec TimeoutMillisec);

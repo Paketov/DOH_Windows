@@ -108,9 +108,11 @@ int LqHandleIsTerminal(LqHandle Fd) {
 }
 
 int LqHandleClose(LqHandle Fd) {
-	if (LqHandleIsSocket(Fd))
-		return (closesocket(Fd) == 0) ? 0 : -1;
 	return (NtClose((HANDLE)Fd) == TRUE) ? 0 : -1;
+}
+
+int LqConnClose(LqHandle Sock) {
+	return (closesocket((SOCKET)Sock) == 0) ? 0 : -1;
 }
 
 LqHandle LqEventCreate(int InheritFlag) {
@@ -191,8 +193,8 @@ int LqPollCheck(LqPoll* Fds, size_t CountFds, LqTimeMillisec TimeoutMillisec) {
 		if (LqHandleIsSocket(Fds[i].fd)) {
 			Types[i] = LQ_POLL_TYPE_SOCKET;
 			Handles[i] = CreateEventW(NULL, TRUE, FALSE, NULL);
-			WSAEventSelect(Fds[i].fd, Handles[i], LqEvntSystemEventByConnFlag(Fds[i].events));
-			WSAEnumNetworkEvents(Fds[i].fd, Handles[i], &NetEvnts);
+			WSAEventSelect((SOCKET)Fds[i].fd, Handles[i], LqEvntSystemEventByConnFlag(Fds[i].events));
+			WSAEnumNetworkEvents((SOCKET)Fds[i].fd, Handles[i], &NetEvnts);
 			if (NetEvnts.lNetworkEvents != 0) {
 				Fds[i].revents = LqConnFlagBySysEvent(NetEvnts.lNetworkEvents);
 				CountEvents++;
@@ -366,7 +368,7 @@ lblAgainCheck:
 			break;
 		case LQ_POLL_TYPE_SOCKET:
 			NetEvnts.lNetworkEvents = 0;
-			WSAEnumNetworkEvents(Fds[i].fd, Handles[i], &NetEvnts);
+			WSAEnumNetworkEvents((SOCKET)Fds[i].fd, Handles[i], &NetEvnts);
 			if (NetEvnts.lNetworkEvents != 0)
 				Fds[i].revents = LqConnFlagBySysEvent(NetEvnts.lNetworkEvents);
 			break;
@@ -455,7 +457,7 @@ lblOut:
 	for (size_t i = 0; i < CountFds; i++) {
 		if (Types[i] == LQ_POLL_TYPE_DRIVER)
 			CancelIo((HANDLE)Fds[i].fd);
-		if ((HANDLE)Fds[i].fd != Handles[i])
+		if (((HANDLE)Fds[i].fd) != Handles[i])
 			CloseHandle(Handles[i]);
 	}
 	LqMemFree(Handles);
@@ -531,6 +533,10 @@ int LqHandleClose(LqHandle Fd) {
 	return close(Fd);
 }
 
+int LqConnClose(LqHandle Sock) {
+	return close(Fd);
+}
+
 
 int LqPollCheck(LqPoll* Fds, size_t CountFds, LqTimeMillisec TimeoutMillisec) {
 	return poll(Fds, CountFds, TimeoutMillisec);
@@ -565,7 +571,11 @@ int LqConnSwitchNonBlock(LqHandle Fd, int IsNonBlock) {
 int LqHandleIsSocket(LqHandle Fd) {
 	int val;
 	socklen_t len = sizeof(val);
-	return getsockopt((SOCKET)Fd, SOL_SOCKET, SO_REUSEADDR, (char*)&val, &len) != -1;
+	return getsockopt((SOCKET)Fd, SOL_SOCKET, SO_ERROR, (char*)&val, &len) != -1;
+
+	//int val;
+	//socklen_t len = sizeof(val);
+	//return getsockopt((SOCKET)Fd, SOL_SOCKET, SO_REUSEADDR, (char*)&val, &len) != -1;
 }
 
 

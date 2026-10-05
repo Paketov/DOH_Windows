@@ -214,7 +214,7 @@ static LqHandle ConnBindUDP(
 		}
 		if (bind(s, i->ai_addr, i->ai_addrlen) == -1) {
 lbl_err:
-			LqHandleClose(s);
+			LqConnClose(s);
 			s = LQ_HANDLE_INVALID;
 			continue;
 		}
@@ -283,7 +283,7 @@ static LqHandle ConnConnectTCP(
 			continue;
 		if (ConnConnectTCPWait(s, i->ai_addr, i->ai_addrlen, DOH_WAIT_CONNECT_SEC) != -1)
 			break;
-		LqHandleClose(s);
+		LqConnClose(s);
 		s = LQ_HANDLE_INVALID;
 	}
 	if (ah != NULL)
@@ -652,7 +652,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 	bool IsPktReceived = false;
 	char* c = NULL, *m = NULL;
 
-	if (strstr(QueryString, "/") == 0) {
+	if (strstr(QueryString, "/") == NULL) {
 		strcpy(HostString, QueryString);
 		strcpy(PathString, "/");
 	} else {
@@ -1005,7 +1005,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 				ssl = NULL;
 			}
 			if (!LqHandleIsInvalid(Socket)) {
-				LqHandleClose(Socket);
+				LqConnClose(Socket);
 				Socket = LQ_HANDLE_INVALID;
 			}
 			WaitTime = INFINITE;
@@ -1151,7 +1151,7 @@ static unsigned __stdcall MainDOH(void* data) {
 	CountWorkers = max(CountWorkers, CountServers);
 	if (CountServers < 1) {
 		OutputDebugString(TEXT("DOH_Windows: DOH_Main() Error CountServers < 1"));
-		LqHandleClose(UDPSocket);
+		LqConnClose(UDPSocket);
 		UDPSocket = LQ_HANDLE_INVALID;
 		goto lblOut;
 	}
@@ -1170,6 +1170,7 @@ static unsigned __stdcall MainDOH(void* data) {
 		uintptr_t Handler = _beginthreadex(NULL, 0, WorkerProc, Wrk, 0, &Wrk->ThreadId);
 		Wrk->ThreadHandle = (HANDLE)Handler;
 	}
+
 	OutputDebugString(TEXT("DOH_Windows: Enter recvfrom loop"));
 	UpdateServiceStatus(SERVICE_RUNNING);
 	for (;;) {
@@ -1194,7 +1195,7 @@ static unsigned __stdcall MainDOH(void* data) {
 		
 		if (res <= 0) {
 			//if (!LqHandleIsInvalid(UDPSocket))
-			//LqHandleClose(UDPSocket);
+			//LqConnClose(UDPSocket);
 			//UDPSocket = ConnBindUDP(LocalAddress, LocalPort, 1024);
 			//Sleep(500);
 			goto lblContinue5;
@@ -1308,7 +1309,7 @@ lblOut:
 
 	OutputDebugString(TEXT("DOH_Windows: Workers threads stopped"));
 	//if (UDPSocket != -1) {
-	//	closesocket(UDPSocket);
+	//	LqConnClose(UDPSocket);
 	//	UDPSocket = -1;
 	//}
 
@@ -1360,7 +1361,7 @@ static DWORD WINAPI ServiceHandler(DWORD dwControl) {
 		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
 		IsStopService.store(true);
 		if (!LqHandleIsInvalid(UDPSocket)) {
-			LqHandleClose(UDPSocket);
+			LqConnClose(UDPSocket);
 		}
 		break;
 	case SERVICE_CONTROL_SHUTDOWN:
@@ -1368,7 +1369,7 @@ static DWORD WINAPI ServiceHandler(DWORD dwControl) {
 		serviceStatus.dwCurrentState = SERVICE_STOP_PENDING;
 		IsStopService.store(true);
 		if (!LqHandleIsInvalid(UDPSocket)) {
-			LqHandleClose(UDPSocket);
+			LqConnClose(UDPSocket);
 		}
 		break;
 	case SERVICE_CONTROL_PAUSE:
@@ -1407,7 +1408,7 @@ extern "C" __declspec(dllexport) VOID WINAPI InstallService() {
 	DWORD dwType = REG_MULTI_SZ, cbData;
 	char Buf[2048];
 	/*
-		in 32 or 64 bit values in reg may be not shared
+		in 32 or 64 bit values in reg maybe not shared
 	*/
 	
 	OutputDebugString(TEXT("DOH_Windows: Start InstallService()"));
