@@ -41,24 +41,20 @@
 
 #endif
 
+#include <time.h>
+
 #include "LqFile.h"
 #include "LqParse.h"
-
-#include <openssl/crypto.h>
-#include <openssl/x509.h>
-#include <openssl/pem.h>
-#include <openssl/ssl.h>
-#include <openssl/err.h>
-#include <openssl/x509v3.h>
-#include <openssl/opensslv.h>
-
-
-
 #include "LqAlloc.hpp"
+
+#include "ssl.h"
 
 
 #define REQ_PKT_SIZE 4096
 #define DOH_WAIT_CONNECT_SEC (6)
+
+
+#if defined(_WIN32) || defined(_WIN64)
 
 # ifndef WSA_VERSION
 #  define WSA_VERSION MAKEWORD(2, 2)
@@ -78,20 +74,22 @@ static struct _wsa_data {
 } wsa_data;
 
 //If compile as .exe
-#ifndef _WINDLL
-# define DOH_CONSOLE_DBG
+# ifndef _WINDLL
+#  define DOH_CONSOLE_DBG
+# endif
+
 #endif
 
 #ifdef DOH_CONSOLE_DBG
-#define DbgConsolePrintf(fmt, ...)	printf(fmt, __VA_ARGS__)
+# define DbgConsolePrintf(fmt, ...)	printf(fmt, __VA_ARGS__)
 #else
-#define DbgConsolePrintf(fmt, ...)	do{} while(0)
+# define DbgConsolePrintf(fmt, ...)	do{} while(0)
 #endif
 
 #ifdef _DEBUG
-#define DbgCheckHeap()				assert(_CrtCheckMemory())
+# define DbgCheckHeap()				assert(_CrtCheckMemory())
 #else
-#define DbgCheckHeap()				do{} while(0)
+# define DbgCheckHeap()				do{} while(0)
 #endif
 
 
@@ -283,7 +281,6 @@ static LqHandle ConnConnectTCP(
 	for (i = ah; i != NULL; i = i->ai_next) {
 		if (LqHandleIsInvalid(s = socket(i->ai_family, i->ai_socktype, i->ai_protocol)))
 			continue;
-		LqConnSwitchNonBlock(s, 1);
 		if (ConnConnectTCPWait(s, i->ai_addr, i->ai_addrlen, DOH_WAIT_CONNECT_SEC) != -1)
 			break;
 		LqHandleClose(s);
@@ -601,40 +598,22 @@ static int GetDomainsNamesFromDNSPkt(const void* Dns, size_t DnsLen, char* DstBu
 	return i;
 }
 
-static bool SetWindowsSSLStoreCerts(X509_STORE* X509_store) {
-	HCERTSTORE hStore;
-	PCCERT_CONTEXT pContext = NULL;
-	X509 *x509;
-
-	hStore = CertOpenSystemStoreW(NULL, L"ROOT");
-	if (!hStore)
-		return false;
-	while (pContext = CertEnumCertificatesInStore(hStore, pContext)) {
-		//uncomment the line below if you want to see the certificates as pop ups
-		//CryptUIDlgViewContext(CERT_STORE_CERTIFICATE_CONTEXT, pContext,   NULL, NULL, 0, NULL);
-		if (x509 = d2i_X509(NULL, (const unsigned char **)&pContext->pbCertEncoded, pContext->cbCertEncoded)){
-			X509_STORE_add_cert(X509_store, x509);
-			X509_free(x509);
-		}
-	}
-	CertFreeCertificateContext(pContext);
-	CertCloseStore(hStore, 0);
-	return true;
-}
-
 static const uint32_t HTTPEndHeaders = *((uint32_t*)"\r\n\r\n");
 static const uint16_t HTTPEndHeader = *((uint16_t*)"\r\n");
 
 static unsigned __stdcall WorkerProc(void* data) {
 	Worker* Wrk = (Worker*)data;
 
-	SSL* ssl = NULL;
+	//SSL* ssl = NULL;
 	LqHandle Socket = LQ_HANDLE_INVALID;
 	LqTimeMillisec WaitTime = INFINITE;
 	int CountFds = 1;
 	LqPoll Fds[2];
 	DnsReq* CurTsk = NULL;
-	SSL_CTX* ssl_ctx = NULL;
+	//SSL_CTX* ssl_ctx = NULL;
+	pchat_ssl_ctx* ctx = NULL;
+	pchat_ssl* ssl = NULL;
+	pchat_ssl_verify_result ver_res;
 
 	Fds[0].fd = Wrk->Event;
 	Fds[0].events = LQ_POLLIN;
@@ -697,49 +676,29 @@ static unsigned __stdcall WorkerProc(void* data) {
 
 	const int HostStringLen = strlen(HostString);
 	const int PathStringLen = strlen(PathString);
+	
+	pchat_ssl_handshake_status stat;
 
 	ssl_ctx_locker.LockWriteYield();
 
-	ssl_ctx = SSL_CTX_new(SSLv23_client_method());
-	if (ssl_ctx == NULL) {
-		OutputDebugString(TEXT("DOH_Windows: Cannot create SSL_CTX"));
-		DbgConsolePrintf("Cannot create SSL_CTX");
+	ctx = pchat_ssl_ctx_new();
+	if (ctx == NULL) {
+		OutputDebugString(TEXT("DOH_Windows: Cannot create pchat_ssl_ctx"));
+		DbgConsolePrintf("Cannot create pchat_ssl_ctx");
 		ssl_ctx_locker.UnlockWrite();
 		goto lbl_err_ssl_ctx_not_created;
 	}
-	bool IsVerifyCA = true;
-	SSL_CTX_set_default_verify_paths(ssl_ctx);
-	DbgCheckHeap();
 	if (SSL_CACertFileForVerify != NULL) {
-		if (SSL_CTX_load_verify_locations(ssl_ctx, SSL_CACertFileForVerify, NULL) != 1) {
-			OutputDebugString(TEXT("DOH_Windows: SSL SSL_CTX_load_verify_locations() returned 0, PEM file cert for verify not used"));
-			DbgConsolePrintf("SSL_CTX_load_verify_locations() returned 0, PEM file cert for verify not used\n");
-			IsVerifyCA = false;
+		if (pchat_ssl_ctx_set_verify(ctx, SSL_CACertFileForVerify) != NULL) {
+			OutputDebugString(TEXT("DOH_Windows: SSL pchat_ssl_ctx_set_verify() != NULL, PEM file cert for verify not used"));
+			DbgConsolePrintf("pchat_ssl_ctx_set_verify() != NULL, PEM file cert for verify not used\n");
 		}
-	}
-	else {
-		//Used for not get X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY error from SSL_get_verify_result()
-		X509_STORE* Store = SSL_CTX_get_cert_store(ssl_ctx);
-		if (Store == NULL) {
-			IsVerifyCA = false;
-			DbgConsolePrintf("SSL_CTX_get_cert_store() returned NULL, cert verify not used\n");
-			OutputDebugString(TEXT("DOH_Windows: SSL SSL_CTX_get_cert_store() returned NULL, cert verify not used"));
-		}
-		else {
-			if (!SetWindowsSSLStoreCerts(Store)) {
-				IsVerifyCA = false;
-				DbgConsolePrintf("Cannot set local windows root certs, cert verify not used\n");
-				OutputDebugString(TEXT("DOH_Windows: SSL Cannot set local windows root certs, cert verify not used"));
-			}
-		}
+	} else {
+		pchat_ssl_ctx_set_verify(ctx, NULL);
 	}
 
 	ssl_ctx_locker.UnlockWrite();
 
-	if (IsVerifyCA) {
-		OutputDebugString(TEXT("DOH_Windows: SSL cert verification is used"));
-		DbgConsolePrintf("SSL cert verification is used");
-	}
 
 	OutputDebugString(TEXT("DOH_Windows: enter worker proc main loop"));
 	for (;;) {
@@ -757,52 +716,42 @@ static unsigned __stdcall WorkerProc(void* data) {
 					OutputDebugString(TEXT("DOH_Windows: ConnConnectTCP returned -1. Maybe net unreacheble"));
 					goto lblPollHup;
 				}
-				ssl = SSL_new(ssl_ctx);
-
-				if (SSL_set_fd(ssl, Socket) == 0) {
+				ssl = pchat_ssl_new(ctx, Socket, HostString);
+				if (ssl == NULL) {
 					goto lblPollHup;
 				}
 
-				if (IsVerifyCA) {
-					SSL_set_hostflags(ssl, X509_CHECK_FLAG_NO_PARTIAL_WILDCARDS);
-					if (!SSL_set1_host(ssl, HostString)) {
-						goto lblPollHup;
-					}
-				}
-				int SslConnectRes;
-				if ((SslConnectRes = SSL_connect(ssl)) < 0) {
+				stat = pchat_ssl_do_handshake(ssl, NULL, 0, NULL);
+
+				if (stat != PCHAT_SSL_HANDSHAKE_DONE) {
 					DbgConsolePrintf("Not connected or SSL handshake error %s\n", Wrk->ServerInfo->Ip);
-					OutputDebugString(TEXT("DOH_Windows: SSL_connect() < 0. Conn error, not have SSL handshake"));
+					OutputDebugString(TEXT("DOH_Windows: pchat_ssl_do_handshake() != PCHAT_SSL_HANDSHAKE_DONE. Conn error, not have SSL handshake"));
 					goto lblPollHup;
-				}
-
-				if (IsVerifyCA) {
-					long VerRes = SSL_get_verify_result(ssl);
-					if (VerRes != X509_V_OK) {//X509_V_ERR_UNABLE_TO_GET_ISSUER_CERT_LOCALLY
-						char Buf[500];
-						const char * VerErrStr = X509_verify_cert_error_string(VerRes);
-						snprintf(
-							Buf, 
-							sizeof(Buf), 
-							"DOH_Windows: SSL_get_verify_result() on host %s(ip %s) returned error num=%i, str=\"%s\"", 
-							HostString,
-							Wrk->ServerInfo->Ip, 
-							(int)VerRes, 
-							VerErrStr
-						);
-						OutputDebugStringA(Buf);
-						DbgConsolePrintf(
-							"SSL_get_verify_result() on host %s (ip %s) returned error num=%i, str=\"%s\"\n", 
-							HostString, 
-							Wrk->ServerInfo->Ip, 
-							(int)VerRes, 
-							VerErrStr
-						);
-						goto lblPollHup;
-					}
 				}
 				
-				LqConnSwitchNonBlock(Socket, true);
+				pchat_ssl_get_verify_result(ssl, HostString, &ver_res);
+				if (!ver_res.verified) {
+					char Buf[500];
+					snprintf(
+						Buf, 
+						sizeof(Buf), 
+						"DOH_Windows: SSL_get_verify_result() on host %s(ip %s) returned error str=\"%s\"", 
+						HostString,
+						Wrk->ServerInfo->Ip, 
+						ver_res.error
+					);
+					OutputDebugStringA(Buf);
+					DbgConsolePrintf(
+						"SSL_get_verify_result() on host %s (ip %s) returned error str=\"%s\"\n", 
+						HostString, 
+						Wrk->ServerInfo->Ip, 
+						ver_res.error
+					);
+
+					goto lblPollHup;
+				}
+				
+				LqConnSwitchNonBlock(Socket, 1);
 				WaitTime = DisconnectWaitTime;
 				Fds[1].fd = Socket;
 				Fds[1].events = LQ_POLLHUP;
@@ -875,21 +824,19 @@ static unsigned __stdcall WorkerProc(void* data) {
 		}
 		if ((CountFds > 1) && ((Fds[1].revents & LQ_POLLOUT) || (SendBufferPos > 0))) { //Is need send data via socket
 			if (SendBufferPos > 0) {
-				int Written = SSL_write(ssl, SendBuffer, SendBufferPos);
-				if (Written <= 0) {
-					switch (SSL_get_error(ssl, Written)) {
-					case SSL_ERROR_NONE: break;
-					case SSL_ERROR_WANT_READ: Fds[1].events |= LQ_POLLIN; goto lblContinue1;
-					case SSL_ERROR_WANT_WRITE: Fds[1].events |= LQ_POLLOUT; goto lblContinue1;
-					case SSL_ERROR_ZERO_RETURN: goto lblPollHup;
-					default: goto lblContinue1;
+				int Written = pchat_ssl_send(ssl, SendBuffer, SendBufferPos);
+				if (Written < 0) {
+					if (LqConnIsWouldBlock()) {
+						Fds[1].events |= LQ_POLLOUT;
+					} else {
+						goto lblPollHup;
 					}
+				} else {
+					SendBufferPos -= Written;
+					memmove(SendBuffer, SendBuffer + Written, SendBufferPos);
+					Fds[1].events |= LQ_POLLIN;
 				}
-				SendBufferPos -= Written;
-				memmove(SendBuffer, SendBuffer + Written, SendBufferPos);
-				Fds[1].events |= LQ_POLLIN;
 			}
-		lblContinue1:;
 			if (SendBufferPos <= 0) {
 				Fds[1].events &= ~LQ_POLLOUT;
 				WaitTime = DisconnectWaitTime;
@@ -899,19 +846,18 @@ static unsigned __stdcall WorkerProc(void* data) {
 		}
 
 		if ((CountFds > 1) && (Fds[1].revents & LQ_POLLIN)) { //If have data in socket
-			int Readed = SSL_read(ssl, ReciveBuffer + ReciveBufferPos, ReciveBufferSize - ReciveBufferPos);
-			if (Readed <= 0) {
-				switch (SSL_get_error(ssl, Readed)) {
-				case SSL_ERROR_NONE: break;
-				case SSL_ERROR_WANT_READ: Fds[1].events |= LQ_POLLIN; goto lblContinue2;
-				case SSL_ERROR_WANT_WRITE: Fds[1].events |= LQ_POLLOUT; goto lblContinue2;
-				case SSL_ERROR_ZERO_RETURN: goto lblPollHup;
-				default: goto lblContinue2;
+			int Readed = pchat_ssl_recv(ssl, ReciveBuffer + ReciveBufferPos, ReciveBufferSize - ReciveBufferPos);
+			if (Readed < 0) {
+				if (LqConnIsWouldBlock()) {
+					Fds[1].events |= LQ_POLLIN;
+				} else {
+					goto lblPollHup;
 				}
+			} else {
+				ReciveBufferPos += Readed;
 			}
-			ReciveBufferPos += Readed;
-		lblContinue2:;
 
+		lblContinue2:;
 			if (Wrk->ServerInfo->IsDNSOverTLS) {
 				/* DNS Over TLS */
 				if (ReciveBufferPos >= sizeof(uint16_t)) {
@@ -1053,8 +999,9 @@ static unsigned __stdcall WorkerProc(void* data) {
 		lblPollHup:;
 			DbgConsolePrintf("Conn closed %s\n", Wrk->ServerInfo->Ip);
 			if (ssl != NULL) {
-				SSL_shutdown(ssl);
-				SSL_free(ssl);
+				pchat_ssl_free(ssl);
+				//SSL_shutdown(ssl);
+				//SSL_free(ssl);
 				ssl = NULL;
 			}
 			if (!LqHandleIsInvalid(Socket)) {
@@ -1102,12 +1049,17 @@ static unsigned __stdcall WorkerProc(void* data) {
 	Wrk->TskLoker.UnlockWrite();
 
 lbl_err_ssl_ctx_not_created:
-	if (ssl_ctx != NULL) {
+	if (ctx != NULL) {
 		ssl_ctx_locker.LockWriteYield();
-		SSL_CTX_free(ssl_ctx);
+		pchat_ssl_ctx_free(ctx);
 		ssl_ctx_locker.UnlockWrite();
-		ssl_ctx = NULL;
 	}
+	//if (ssl_ctx != NULL) {
+	//	ssl_ctx_locker.LockWriteYield();
+	//	SSL_CTX_free(ssl_ctx);
+	//	ssl_ctx_locker.UnlockWrite();
+	//	ssl_ctx = NULL;
+	//}
 
 	OutputDebugString(TEXT("DOH_Windows: WorkerProc memory free"));
 	free(QueryString);
@@ -1148,10 +1100,13 @@ static unsigned __stdcall MainDOH(void* data) {
 		"CountWorkers:\n"
 		"2\n"
 		"LocalAddress:\n"
-		" 0.0.0.0 53\n"
+		" 127.0.0.1 53\n"
 		"DOHServers:\n"
 		" 1.1.1.1 443 https://cloudflare-dns.com/dns-query\n"
-		" 8.8.8.8 443 https://dns.google/dns-query\n",
+		" 8.8.8.8 443 https://dns.google/dns-query\n"
+		"HostsMatch:\n"
+		" cacerts.digicert.com$ 23.11.41.157\n"
+		" ocsp.digicert.com$ 23.11.41.157\n",
 		*ConfigFile = ConfigFile2;
 
 	ConfigFileSize = sizeof(ConfigFile2);
@@ -1181,8 +1136,6 @@ static unsigned __stdcall MainDOH(void* data) {
 	ConfigFileSize = ParseConfigFile(ConfigFile, ConfigFileSize);
 
 	OutputDebugString(TEXT("DOH_Windows: ParseConfigFile() executed"));
-	SSL_load_error_strings();
-	SSL_library_init();
 
 	DbgCheckHeap();
 

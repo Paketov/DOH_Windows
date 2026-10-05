@@ -3,19 +3,22 @@ CountWorkers:
 DisconnectWaitTime:
  20000
 LocalAddress:
- ::ffff:127.0.0.1 53 #127.0.0.1 53
+ #127.0.0.1 53
+ ::ffff:127.0.0.1 53
 DOHServers:
  8.8.8.8 443 https://dns.google/dns-query #Traffic via DOH by default
  DOT 149.112.112.112 853 dns.quad9.net  #Traffic via DOT(DNS over TLS)
 HostsMatch:
+  cacerts.digicert.com$ 23.11.41.157
+  ocsp.digicert.com$ 23.11.41.157
   ?*.lon.llnw.net$		0.0.0.0
   ?*.telemetry.microsoft.com$
   ?*.telemetry.microsoft.com.nsatc.net$
   ?*.mp.microsoft.com$
   ?*.wns.windows.com$
-  ?*windowsupdate.com$
+  #?*windowsupdate.com$
   ?*checkappexec.microsoft.com$
-  ?*vortex.data.microsoft.com$
+  #?*vortex.data.microsoft.com$
   #?*win8.ipv6.microsoft.com$
   ^push.services.mozilla.com$
 

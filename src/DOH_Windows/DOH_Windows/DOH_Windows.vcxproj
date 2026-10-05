@@ -172,12 +172,15 @@
     <ClCompile Include="LqFile.cpp" />
     <ClCompile Include="LqParse.cpp" />
     <ClCompile Include="Main.cpp" />
+    <ClCompile Include="ssl_openssl.c" />
+    <ClCompile Include="ssl_schannel.c" />
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="LqAlloc.hpp" />
     <ClInclude Include="LqFile.h" />
     <ClInclude Include="LqLock.hpp" />
     <ClInclude Include="LqParse.h" />
+    <ClInclude Include="ssl.h" />
   </ItemGroup>
   <ItemGroup>
     <None Include="Source.def" />

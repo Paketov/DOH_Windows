@@ -24,6 +24,12 @@
     <ClCompile Include="LqParse.cpp">
       <Filter>Файлы исходного кода</Filter>
     </ClCompile>
+    <ClCompile Include="ssl_schannel.c">
+      <Filter>Файлы исходного кода</Filter>
+    </ClCompile>
+    <ClCompile Include="ssl_openssl.c">
+      <Filter>Файлы исходного кода</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="LqAlloc.hpp">
@@ -36,6 +42,9 @@
       <Filter>Заголовочные файлы</Filter>
     </ClInclude>
     <ClInclude Include="LqParse.h">
+      <Filter>Заголовочные файлы</Filter>
+    </ClInclude>
+    <ClInclude Include="ssl.h">
       <Filter>Заголовочные файлы</Filter>
     </ClInclude>
   </ItemGroup>
