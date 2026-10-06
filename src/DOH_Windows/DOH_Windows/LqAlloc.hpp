@@ -15,8 +15,7 @@
 #include "LqLock.hpp"
 
 
-
-#if /*!defined(_DEBUG) &&*/ defined(LQPLATFORM_WINDOWS)
+#if defined(_WIN64) || defined(_WIN32)
 #include <Windows.h>
 #define LqMemAlloc(size) HeapAlloc(GetProcessHeap(), 0, (size))
 #define LqMemFree(pointer) HeapFree(GetProcessHeap(), 0, (pointer))
