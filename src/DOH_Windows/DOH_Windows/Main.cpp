@@ -709,7 +709,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 			DbgConsolePrintf("Event recived %s\n", Wrk->ServerInfo->Ip);
 
 			LqEventReset(Fds[0].fd);
-			if ((Wrk->StartTsk != NULL) && (LqHandleIsInvalid(Socket))) { //???? ???? ?????????? ? HTTPS ????????, ??????????
+			if ((Wrk->StartTsk != NULL) && LqHandleIsInvalid(Socket)) { //???? ???? ?????????? ? HTTPS ????????, ??????????
 				Socket = ConnConnectTCP(Wrk->ServerInfo->Ip, Wrk->ServerInfo->Port);
 				if (LqHandleIsInvalid(Socket)) {
 					DbgConsolePrintf("Conn error %s\n", Wrk->ServerInfo->Ip);
@@ -759,20 +759,14 @@ static unsigned __stdcall WorkerProc(void* data) {
 				CountFds = 2;
 				DbgConsolePrintf("Conn created %s\n", Wrk->ServerInfo->Ip);
 			}
-			for (;;) {
-				Wrk->TskLoker.LockReadYield();
-				CurTsk = Wrk->CurTsk;
-				Wrk->TskLoker.UnlockRead();
-
-				if (CurTsk == NULL) {
-					break;
-				}
-
-
+			Wrk->TskLoker.LockReadYield();
+			CurTsk = Wrk->CurTsk;
+			Wrk->TskLoker.UnlockRead();
+			for (; CurTsk != NULL;) {
 				if (Wrk->ServerInfo->IsDNSOverTLS) {
 					/* DNS Over TLS
-						https://datatracker.ietf.org/doc/html/rfc1035#section-4.2.2
-						https://datatracker.ietf.org/doc/html/rfc8484#section-5.2 
+					https://datatracker.ietf.org/doc/html/rfc1035#section-4.2.2
+					https://datatracker.ietf.org/doc/html/rfc8484#section-5.2
 					*/
 
 					if ((SendBufferPos + CurTsk->BufLen + sizeof(uint16_t)) > SendBufferSize) { //If queue very hight
@@ -783,7 +777,8 @@ static unsigned __stdcall WorkerProc(void* data) {
 					SendBufferPos += sizeof(uint16_t);
 					memcpy(SendBuffer + SendBufferPos, CurTsk->Buf, CurTsk->BufLen);
 					SendBufferPos += CurTsk->BufLen;
-				} else {
+				}
+				else {
 					/* DNS Over HTTPS */
 
 					//int Base64Len = LqDataToBase64(true, false, CurTsk->Buf, CurTsk->BufLen, Base64Buf, Base64BufSize - 3);
@@ -808,7 +803,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 						//Base64Buf,
 						HostString,
 						(int)CurTsk->BufLen
-					);
+						);
 					SendBufferPos += WrittenInBuf;
 					memcpy(SendBuffer + SendBufferPos, CurTsk->Buf, CurTsk->BufLen);
 					SendBufferPos += CurTsk->BufLen;
@@ -818,7 +813,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 				Fds[1].revents |= LQ_POLLOUT;
 
 				Wrk->TskLoker.LockWriteYield();
-				Wrk->CurTsk = Wrk->CurTsk->PrevTsk;
+				CurTsk = Wrk->CurTsk = Wrk->CurTsk->PrevTsk;
 				Wrk->TskLoker.UnlockWrite();
 			}
 		}
@@ -1000,8 +995,6 @@ static unsigned __stdcall WorkerProc(void* data) {
 			DbgConsolePrintf("Conn closed %s\n", Wrk->ServerInfo->Ip);
 			if (ssl != NULL) {
 				pchat_ssl_free(ssl);
-				//SSL_shutdown(ssl);
-				//SSL_free(ssl);
 				ssl = NULL;
 			}
 			if (!LqHandleIsInvalid(Socket)) {
@@ -1014,7 +1007,6 @@ static unsigned __stdcall WorkerProc(void* data) {
 			SendBufferPos = 0;
 			ReciveBufferPos = 0;
 			Wrk->TskLoker.LockWriteYield();
-			//LqEventReset(Fds[0].fd);
 
 			if (IsPktReceived) { /*  Is recived paket from DOH server and connection unexpectedly closed */
 				Wrk->CurTsk = Wrk->EndTsk;
@@ -1284,7 +1276,7 @@ static unsigned __stdcall MainDOH(void* data) {
 		Workers[TargetWrk]->TskLoker.UnlockWrite();
 
 		LqEventSet(Workers[TargetWrk]->Event);
-		DbgConsolePrintf("Send job to worker(set event)\n");
+		DbgConsolePrintf("Send job to worker(set event) %s\n", Workers[TargetWrk]->ServerInfo->Ip);
 
 		DbgCheckHeap();
 	}
