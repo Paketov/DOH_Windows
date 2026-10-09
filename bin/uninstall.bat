@@ -14,4 +14,6 @@ SETLOCAL EnableDelayedExpansion
 
 for /F "skip=3 tokens=3*" %G in ('netsh interface show interface') do ( netsh interface ip set dns "%H" dhcp )
 
+for /F "skip=3 tokens=3*" %G in ('netsh interface show interface') do ( netsh interface ipv6 set dns "%H" dhcp )
+
 :batExit
