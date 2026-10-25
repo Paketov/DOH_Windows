@@ -52,6 +52,7 @@
 
 #define REQ_PKT_SIZE 4096
 #define DOH_WAIT_CONNECT_SEC (6)
+#define DOH_WAIT_RESPONCE_MILLISEC (1000)
 
 
 #if defined(_WIN32) || defined(_WIN64)
@@ -706,7 +707,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 		Fds[1].revents = 0;
 		int PollRes = LqPollCheck(Fds, CountFds, WaitTime);
 		if (Fds[0].revents & LQ_POLLIN) { //If have input task event
-			DbgConsolePrintf("Event recived %s\n", Wrk->ServerInfo->Ip);
+			DbgConsolePrintf("Event received %s\n", Wrk->ServerInfo->Ip);
 
 			LqEventReset(Fds[0].fd);
 			if ((Wrk->StartTsk != NULL) && LqHandleIsInvalid(Socket)) { //???? ???? ?????????? ? HTTPS ????????, ??????????
@@ -735,14 +736,14 @@ static unsigned __stdcall WorkerProc(void* data) {
 					snprintf(
 						Buf, 
 						sizeof(Buf), 
-						"DOH_Windows: SSL_get_verify_result() on host %s(ip %s) returned error str=\"%s\"", 
+						"DOH_Windows: pchat_ssl_get_verify_result() on host %s(ip %s) returned error str=\"%s\"", 
 						HostString,
 						Wrk->ServerInfo->Ip, 
 						ver_res.error
 					);
 					OutputDebugStringA(Buf);
 					DbgConsolePrintf(
-						"SSL_get_verify_result() on host %s (ip %s) returned error str=\"%s\"\n", 
+						"pchat_ssl_get_verify_result() on host %s (ip %s) returned error str=\"%s\"\n", 
 						HostString, 
 						Wrk->ServerInfo->Ip, 
 						ver_res.error
@@ -823,10 +824,12 @@ static unsigned __stdcall WorkerProc(void* data) {
 				if (Written < 0) {
 					if (LqConnIsWouldBlock()) {
 						Fds[1].events |= LQ_POLLOUT;
+						WaitTime = DOH_WAIT_RESPONCE_MILLISEC;
 					} else {
 						goto lblPollHup;
 					}
 				} else {
+					WaitTime = DOH_WAIT_RESPONCE_MILLISEC;
 					SendBufferPos -= Written;
 					memmove(SendBuffer, SendBuffer + Written, SendBufferPos);
 					Fds[1].events |= LQ_POLLIN;
@@ -834,11 +837,13 @@ static unsigned __stdcall WorkerProc(void* data) {
 			}
 			if (SendBufferPos <= 0) {
 				Fds[1].events &= ~LQ_POLLOUT;
-				WaitTime = DisconnectWaitTime;
-			} else {
+				//WaitTime = DisconnectWaitTime;
+			} /*else {
 				WaitTime = 500;
-			}
+			}*/
 		}
+
+
 
 		if ((CountFds > 1) && (Fds[1].revents & LQ_POLLIN)) { //If have data in socket
 			int Readed = pchat_ssl_recv(ssl, ReciveBuffer + ReciveBufferPos, ReciveBufferSize - ReciveBufferPos);
@@ -882,6 +887,8 @@ static unsigned __stdcall WorkerProc(void* data) {
 							Wrk->EndTsk->NextTsk = NULL;
 						}
 						Wrk->TskLen--;
+						if (Wrk->TskLen <= 0)
+							WaitTime = DisconnectWaitTime;
 						Wrk->TskLoker.UnlockWrite();
 
 						LqFastAlloc::Delete(FirstReq);
@@ -977,6 +984,8 @@ static unsigned __stdcall WorkerProc(void* data) {
 						Wrk->EndTsk->NextTsk = NULL;
 					}
 					Wrk->TskLen--;
+					if (Wrk->TskLen <= 0)
+						WaitTime = DisconnectWaitTime;
 					Wrk->TskLoker.UnlockWrite();
 
 					LqFastAlloc::Delete(FirstReq);
@@ -990,7 +999,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 			}
 		}
 
-		if ((Fds[1].revents & LQ_POLLHUP) || ((WaitTime == DisconnectWaitTime) && (PollRes == 0)) || Wrk->IsEndWork.load()) {
+		if ((Fds[1].revents & LQ_POLLHUP) || (PollRes == 0) || Wrk->IsEndWork.load()) {
 		lblPollHup:;
 			DbgConsolePrintf("Conn closed %s\n", Wrk->ServerInfo->Ip);
 			if (ssl != NULL) {
@@ -1001,18 +1010,17 @@ static unsigned __stdcall WorkerProc(void* data) {
 				LqConnClose(Socket);
 				Socket = LQ_HANDLE_INVALID;
 			}
-			WaitTime = INFINITE;
 			CountFds = 1;
 			Fds[1].events = 0;
 			SendBufferPos = 0;
 			ReciveBufferPos = 0;
 			Wrk->TskLoker.LockWriteYield();
 
-			if (IsPktReceived) { /*  Is recived paket from DOH server and connection unexpectedly closed */
+			if (IsPktReceived && !((PollRes == 0) && (WaitTime == DOH_WAIT_RESPONCE_MILLISEC))) { /*  Is received paket from DOH server and connection unexpectedly closed */
 				Wrk->CurTsk = Wrk->EndTsk;
 				if (Wrk->CurTsk != NULL)
 					LqEventSet(Fds[0].fd);
-			} else { /* Is not recived paket from DOH server, then clear task queue */
+			} else { /* Is not received paket from DOH server, then clear task queue */
 				for (DnsReq* r = Wrk->StartTsk, *f; r != NULL; r = f) {
 					f = r->NextTsk;
 					LqFastAlloc::Delete(r);
@@ -1023,6 +1031,9 @@ static unsigned __stdcall WorkerProc(void* data) {
 				Wrk->TskLen = 0;
 			}
 			Wrk->TskLoker.UnlockWrite();
+
+			WaitTime = INFINITE;
+
 			IsPktReceived = false;
 			if (Wrk->IsEndWork.load())
 				break;
@@ -1176,11 +1187,11 @@ static unsigned __stdcall MainDOH(void* data) {
 			int RecvfromErr = WSAGetLastError(); //WSAECONNRESET
 			DbgConsolePrintf("recvfrom() return -1, error code: %i\n", RecvfromErr);
 		} else {
-			DbgConsolePrintf("Recived DNS pkt\n");
+			DbgConsolePrintf("recvfrom() received DNS pkt\n");
 		}
 #endif
 		if (IsStopService.load()) {
-			OutputDebugString(TEXT("DOH_Windows: MainDOH() recive stop event"));
+			OutputDebugString(TEXT("DOH_Windows: MainDOH() received stop event"));
 			LqFastAlloc::Delete(Req);
 			break;
 		}

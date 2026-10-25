@@ -295,7 +295,6 @@ pchat_ssl_ctx_set_verify (pchat_ssl_ctx *wrap, const char* cacert_pem_file)
 		}
 	}
 #endif
-	//SSL_CTX_load_verify_locations((SSL_CTX*)*(intptr_t*)ctx, "C:\\Users\\I\\Desktop\\cacert-2024-07-02.pem", NULL)
 	if (!loaded)
 	{
 #ifdef DEFAULT_CERT_FILE
