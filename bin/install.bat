@@ -9,6 +9,8 @@ copy /Y %target_dll_name% "%systemroot%\system32\DOH_Windows.dll"
 
 copy /Y "%~dp0doh.txt" "%systemroot%\system32\drivers\etc\doh.txt"
 
+copy /Y "%~dp0cacert-2024-07-02.pem" "%systemroot%\system32\drivers\etc\cacert-2024-07-02.pem"
+
 sc delete DOH_Windows
 
 timeout 2

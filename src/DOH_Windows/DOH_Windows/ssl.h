@@ -37,8 +37,8 @@
 
 #define USE_SSL
 
-//#define USE_OPENSSL
-#define USE_SCHANNEL
+#define USE_OPENSSL
+//#define USE_SCHANNEL
 
 #ifdef USE_SSL
 

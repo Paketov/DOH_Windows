@@ -929,12 +929,12 @@ static int
 verify_chain (pchat_ssl_ctx *ctx, PCCERT_CONTEXT cert, const char *hostname,
               char *errbuf, size_t errbuf_size, int *recoverable)
 {
-	CERT_CHAIN_PARA chain_para = { sizeof (chain_para) };
+	CERT_CHAIN_PARA chain_para = { 0 };
 	PCCERT_CHAIN_CONTEXT chain = NULL;
-	LPSTR usages[] = { szOID_PKIX_KP_SERVER_AUTH };
-	HTTPSPolicyCallbackData https = { 0 };
-	CERT_CHAIN_POLICY_PARA pol_para = { sizeof (pol_para) };
-	CERT_CHAIN_POLICY_STATUS pol_status = { sizeof (pol_status) };
+	//LPSTR usages[] = { szOID_PKIX_KP_SERVER_AUTH };
+	CERT_CHAIN_POLICY_PARA pol_para = { 0 };
+	SSL_EXTRA_CERT_CHAIN_POLICY_PARA extra = { 0 };
+	CERT_CHAIN_POLICY_STATUS pol_status = { 0 };
 	HCERTCHAINENGINE engine = NULL;
 	wchar_t whost[256] = { 0 };
 	int ok = 0;
@@ -955,13 +955,13 @@ verify_chain (pchat_ssl_ctx *ctx, PCCERT_CONTEXT cert, const char *hostname,
 		}
 	}
 
-	
-	chain_para.RequestedUsage.dwType = USAGE_MATCH_TYPE_OR;
-	chain_para.RequestedUsage.Usage.cUsageIdentifier = 1;
-	chain_para.RequestedUsage.Usage.rgpszUsageIdentifier = usages;
+	chain_para.cbSize = sizeof(chain_para);
+	//chain_para.RequestedUsage.dwType = USAGE_MATCH_TYPE_OR;
+	//chain_para.RequestedUsage.Usage.cUsageIdentifier = 1;
+	//chain_para.RequestedUsage.Usage.rgpszUsageIdentifier = usages;
 
 
-	if (!CertGetCertificateChain (engine, cert, NULL, NULL, &chain_para,
+	if (!CertGetCertificateChain (engine, cert, NULL, ctx->cert_store, &chain_para,
 		0, NULL, &chain))
 	{
 		if(engine) CertFreeCertificateChainEngine(engine);
@@ -974,10 +974,14 @@ verify_chain (pchat_ssl_ctx *ctx, PCCERT_CONTEXT cert, const char *hostname,
 	if (hostname && *hostname)
 		MultiByteToWideChar (CP_UTF8, 0, hostname, -1, whost, 255);
 
-	https.cbStruct = sizeof (https);
-	https.dwAuthType = AUTHTYPE_SERVER;
-	https.pwszServerName = whost[0] ? whost : NULL;
-	pol_para.pvExtraPolicyPara = &https;
+	extra.cbSize = sizeof(extra);
+	extra.dwAuthType = AUTHTYPE_SERVER;
+	extra.pwszServerName = whost[0] ? whost : NULL;
+
+	pol_status.cbSize = sizeof(pol_status);
+
+	pol_para.cbSize = sizeof(pol_para);
+	pol_para.pvExtraPolicyPara = &extra;
 
 	if (!CertVerifyCertificateChainPolicy (CERT_CHAIN_POLICY_SSL,
 		chain, &pol_para, &pol_status))

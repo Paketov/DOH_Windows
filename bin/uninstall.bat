@@ -7,6 +7,7 @@ sc delete DOH_Windows
 timeout 2
 del /Y "%systemroot%\system32\DOH_Windows.dll"
 del /Y "%systemroot%\system32\drivers\etc\doh.txt"
+del /Y "%systemroot%\system32\drivers\etc\cacert-2024-07-02.pem"
 
 reg delete HKLM\SYSTEM\CurrentControlSet\services\DOH_Windows /va /f
 
