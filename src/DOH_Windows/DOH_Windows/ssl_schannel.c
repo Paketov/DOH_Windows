@@ -44,6 +44,7 @@ https://github.com/PChat-IRC/PChat/blob/bece5362af045ea16c7ed531a12713878c324849
 #pragma comment (lib, "ws2_32.lib")
 #pragma comment (lib, "secur32.lib")
 #pragma comment (lib, "shlwapi.lib")
+#pragma comment (lib, "cryptnet.lib")
 
 #define SECURITY_WIN32
 #include <windows.h>
@@ -200,10 +201,20 @@ pchat_ssl_ctx_new (void)
 		/* We perform verification ourselves so we can produce nice
 		 * diagnostics and honour accept_invalid_cert. */
 		| SCH_CRED_MANUAL_CRED_VALIDATION
+		| SCH_CRED_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT
 		| SCH_CRED_AUTO_CRED_VALIDATION * 0;
 
-	s = AcquireCredentialsHandleA (NULL, (SEC_CHAR *) UNISP_NAME_A,
-		SECPKG_CRED_OUTBOUND, NULL, &scred, NULL, NULL, &c->cred, NULL);
+	s = AcquireCredentialsHandleA (
+		NULL, 
+		(SEC_CHAR *) UNISP_NAME_A,
+		SECPKG_CRED_OUTBOUND, 
+		NULL, 
+		&scred, 
+		NULL, 
+		NULL, 
+		&c->cred, 
+		NULL
+	);
 	if (s != SEC_E_OK)
 	{
 		g_free (c);
@@ -262,11 +273,13 @@ static int AddCAPemFileInCertStore(pchat_ssl_ctx *c, const char* pemFilePath) {
 	HCERTSTORE newStore = NULL, hStore2;
 
 	if (!c->cert_store) {
-		newStore = CertOpenStore(CERT_STORE_PROV_MEMORY,
+		newStore = CertOpenStore(
+			CERT_STORE_PROV_MEMORY,
 			X509_ASN_ENCODING | PKCS_7_ASN_ENCODING,
 			0,
 			CERT_STORE_CREATE_NEW_FLAG,
-			NULL);
+			NULL
+		);
 		if (!newStore) 
 			goto lbl_out;
 		hStore2 = newStore;
@@ -713,9 +726,20 @@ pchat_ssl_do_handshake (pchat_ssl *s, char *errbuf, size_t errbuf_size,
 		out_desc.cBuffers = 1;
 		out_desc.pBuffers = out_bufs;
 
-		ss = InitializeSecurityContextA (&s->ctx->cred, NULL,
-			(SEC_CHAR *) s->hostname, req_flags, 0, 0, NULL, 0,
-			&s->hctx, &out_desc, &ctx_attr, NULL);
+		ss = InitializeSecurityContextA(
+			&s->ctx->cred,
+			NULL,
+			(SEC_CHAR *) s->hostname,
+			req_flags, 
+			0, 
+			0, 
+			NULL, 
+			0,
+			&s->hctx, 
+			&out_desc, 
+			&ctx_attr, 
+			NULL
+		);
 		s->have_hctx = 1;
 
 		if (ss != SEC_I_CONTINUE_NEEDED && ss != SEC_E_OK)
@@ -893,6 +917,8 @@ pchat_ssl_handshake_timed_out (pchat_ssl *s, int timeout_secs)
 	return (s->handshake_started + timeout_secs) < time (NULL);
 }
 
+
+
 /* ---------- post-handshake info ---------- */
 
 static PCCERT_CONTEXT
@@ -902,6 +928,57 @@ get_remote_cert (pchat_ssl *s)
 	if (QueryContextAttributes (&s->hctx,
 		SECPKG_ATTR_REMOTE_CERT_CONTEXT, &cert) != SEC_E_OK)
 		return NULL;
+	//cert->hCertStore
+
+	//if (s->ctx->cert_store) {
+		//HCERTSTORE hStore = cert->hCertStore;
+		//PCCERT_CONTEXT pContext = NULL;
+		//if (!hStore)
+		//	return 0;
+		////HCERTSTORE Store = CertOpenSystemStoreW(NULL, L"ROOT");
+		//while (pContext = CertEnumCertificatesInStore(hStore, pContext)) {
+		//	//uncomment the line below if you want to see the certificates as pop ups
+		//	//CryptUIDlgViewContext(CERT_STORE_CERTIFICATE_CONTEXT, pContext,   NULL, NULL, 0, NULL);
+
+		//	CRYPT_URL_ARRAY *urls;
+		//	//CertAddCertificateContextToStore(s->ctx->cert_store, pContext, CERT_STORE_ADD_REPLACE_EXISTING, NULL);
+
+
+
+		//	//PCCERT_CONTEXT isHave = CertFindCertificateInStore(s->ctx->cert_store, X509_ASN_ENCODING | PKCS_7_ASN_ENCODING, 0, CERT_FIND_EXISTING, pContext, NULL);
+
+		//	//if (isHave) {
+		//	//	CertFreeCertificateContext(isHave);
+		//	//	continue;
+		//	//}
+		//	//CertFreeCertificateContext(isHave);
+
+		//	char* Issuer = pContext->pCertInfo->Issuer.pbData;
+		//	//FindCer
+		//	char data[256];
+		//	DWORD data_size = sizeof(data);
+		//	DWORD size;
+
+		//	BOOL res = CryptGetObjectUrl(URL_OID_CERTIFICATE_OCSP_AND_CRL_DIST_POINT, (void*)cert, 0, NULL, &size, NULL, NULL, NULL);
+		//	if (!res)
+		//		continue;
+
+		//	urls = malloc(size);
+
+		//	res = CryptGetObjectUrl(URL_OID_CERTIFICATE_OCSP_AND_CRL_DIST_POINT, (void*)cert, 0, urls, &size, NULL, NULL, NULL);
+
+		//	free(urls);
+
+		//	//CertGetCertificateContextProperty(pContext, CERT_SOURCE_URL_PROP_ID, data, &data_size);
+		//	int yy = 0;
+		//}
+
+		////pContext->pCertInfo->rgExtension->Value;
+		//CertFreeCertificateContext(pContext);
+		//CertCloseStore(hStore, 0);
+	//}
+	//szOID_SUBJECT_ALT_NAME
+
 	return cert;
 }
 
@@ -931,7 +1008,7 @@ verify_chain (pchat_ssl_ctx *ctx, PCCERT_CONTEXT cert, const char *hostname,
 {
 	CERT_CHAIN_PARA chain_para = { 0 };
 	PCCERT_CHAIN_CONTEXT chain = NULL;
-	//LPSTR usages[] = { szOID_PKIX_KP_SERVER_AUTH };
+	LPSTR usages[] = { szOID_PKIX_KP_SERVER_AUTH };
 	CERT_CHAIN_POLICY_PARA pol_para = { 0 };
 	SSL_EXTRA_CERT_CHAIN_POLICY_PARA extra = { 0 };
 	CERT_CHAIN_POLICY_STATUS pol_status = { 0 };
@@ -956,14 +1033,23 @@ verify_chain (pchat_ssl_ctx *ctx, PCCERT_CONTEXT cert, const char *hostname,
 	}
 
 	chain_para.cbSize = sizeof(chain_para);
+	//szOID_PKIX_OCSP_NOCHECK
+	//chain_para.dwFlags = CERT_CHAIN_DISABLE_OCSP;
 	//chain_para.RequestedUsage.dwType = USAGE_MATCH_TYPE_OR;
 	//chain_para.RequestedUsage.Usage.cUsageIdentifier = 1;
 	//chain_para.RequestedUsage.Usage.rgpszUsageIdentifier = usages;
 
-
-	if (!CertGetCertificateChain (engine, cert, NULL, ctx->cert_store, &chain_para,
-		0, NULL, &chain))
-	{
+	//Download certificate use OCSP/CRL
+	if (!CertGetCertificateChain(
+		engine, 
+		cert, 
+		NULL,
+		ctx->cert_store, 
+		&chain_para,
+		0,
+		NULL,
+		&chain
+	)) {
 		if(engine) CertFreeCertificateChainEngine(engine);
 		g_snprintf (errbuf, errbuf_size,
 			"CertGetCertificateChain failed (0x%08lx)",
@@ -983,9 +1069,12 @@ verify_chain (pchat_ssl_ctx *ctx, PCCERT_CONTEXT cert, const char *hostname,
 	pol_para.cbSize = sizeof(pol_para);
 	pol_para.pvExtraPolicyPara = &extra;
 
-	if (!CertVerifyCertificateChainPolicy (CERT_CHAIN_POLICY_SSL,
-		chain, &pol_para, &pol_status))
-	{
+	if (!CertVerifyCertificateChainPolicy (
+		CERT_CHAIN_POLICY_SSL,
+		chain,
+		&pol_para, 
+		&pol_status
+	)) {
 		if (engine) CertFreeCertificateChainEngine(engine);
 		g_snprintf (errbuf, errbuf_size,
 			"CertVerifyCertificateChainPolicy failed (0x%08lx)",
@@ -1146,6 +1235,102 @@ pchat_ssl_get_cert_info (struct cert_info *out, pchat_ssl *s)
 			st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
 
 	out->rsa_tmp_bits = 0;
+
+
+	HCERTSTORE hStore = cert->hCertStore;
+	
+	if (hStore) {
+		PCCERT_CONTEXT pContext = NULL;
+		int buf_ofset = 0;
+		int url_count = 0;
+		int size_buf = sizeof(out->__buf_for_crl_urls);
+		int j = 0;
+		//Get crl address URL
+		//HCERTSTORE Store = CertOpenSystemStoreW(NULL, L"ROOT");
+		while (pContext = CertEnumCertificatesInStore(hStore, pContext)) {
+			CRYPT_URL_ARRAY *urls;
+			DWORD size = 0;
+
+			BOOL res = CryptGetObjectUrl(URL_OID_CERTIFICATE_OCSP_AND_CRL_DIST_POINT, (void*)pContext, 0, NULL, &size, NULL, NULL, NULL);
+			if (!res)
+				continue;
+			urls = malloc(size);
+			res = CryptGetObjectUrl(URL_OID_CERTIFICATE_OCSP_AND_CRL_DIST_POINT, (void*)pContext, 0, urls, &size, NULL, NULL, NULL);
+
+			for (int i = 0; (i < urls->cUrl) && (j < (sizeof(out->crl_urls) / sizeof(out->crl_urls[0]))); i++) {
+				int len = wcslen(urls->rgwszUrl[i]);
+				if ((buf_ofset + len * 2 + 1) >= size_buf)
+					continue;
+				WideCharToMultiByte(
+					CP_UTF8, 
+					0, 
+					urls->rgwszUrl[i], 
+					len + 1, 
+					out->__buf_for_crl_urls + buf_ofset, 
+					sizeof(out->__buf_for_crl_urls) - buf_ofset, 
+					NULL,
+					NULL
+				);
+
+
+				len = strlen(out->__buf_for_crl_urls + buf_ofset);
+				out->crl_urls[j] = out->__buf_for_crl_urls + buf_ofset;
+				buf_ofset += (len + 1);
+				url_count++;
+				j++;
+			}
+			free(urls);
+		}
+		out->crl_urls_count = url_count;
+		if(pContext)
+			CertFreeCertificateContext(pContext);
+		//CertCloseStore(hStore, 0);
+
+		buf_ofset = 0;
+		url_count = 0;
+		size_buf = sizeof(out->__buf_for_ocsp_urls);
+		j = 0;
+		//Get ocsp address URL
+		//HCERTSTORE Store = CertOpenSystemStoreW(NULL, L"ROOT");
+		while (pContext = CertEnumCertificatesInStore(hStore, pContext)) {
+			CRYPT_URL_ARRAY *urls;
+			DWORD size = 0;
+
+			BOOL res = CryptGetObjectUrl(URL_OID_CERTIFICATE_ISSUER, (void*)pContext, 0, NULL, &size, NULL, NULL, NULL);
+			if (!res)
+				continue;
+			urls = malloc(size);
+			res = CryptGetObjectUrl(URL_OID_CERTIFICATE_ISSUER, (void*)pContext, 0, urls, &size, NULL, NULL, NULL);
+
+			for (int i = 0; (i < urls->cUrl) && (j < (sizeof(out->ocsp_urls)/sizeof(out->ocsp_urls[0]))); i++) {
+				int len = wcslen(urls->rgwszUrl[i]);
+				if ((buf_ofset + len * 2 + 1) >= size_buf)
+					continue;
+				WideCharToMultiByte(
+					CP_UTF8,
+					0,
+					urls->rgwszUrl[i],
+					len + 1,
+					out->__buf_for_ocsp_urls + buf_ofset,
+					sizeof(out->__buf_for_ocsp_urls) - buf_ofset,
+					NULL,
+					NULL
+				);
+
+
+				len = strlen(out->__buf_for_ocsp_urls + buf_ofset);
+				out->ocsp_urls[j] = out->__buf_for_ocsp_urls + buf_ofset;
+				buf_ofset += (len + 1);
+				url_count++;
+				j++;
+			}
+			free(urls);
+		}
+		out->ocsp_urls_count = url_count;
+		if (pContext)
+			CertFreeCertificateContext(pContext);
+	}
+
 	CertFreeCertificateContext (cert);
 	return 0;
 }

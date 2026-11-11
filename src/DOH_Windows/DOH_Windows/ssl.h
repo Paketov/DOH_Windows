@@ -37,8 +37,8 @@
 
 #define USE_SSL
 
-#define USE_OPENSSL
-//#define USE_SCHANNEL
+//#define USE_OPENSSL
+#define USE_SCHANNEL
 
 #ifdef USE_SSL
 
@@ -63,6 +63,15 @@ extern "C" {
 		char notbefore[32];
 		char notafter[32];
 		int rsa_tmp_bits;
+
+		int ocsp_urls_count;
+		char* ocsp_urls[20];
+		char __buf_for_ocsp_urls[2048];
+
+		int crl_urls_count;
+		char* crl_urls[20];
+		char __buf_for_crl_urls[2048];
+
 	};
 
 	struct chiper_info {

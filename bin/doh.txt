@@ -11,8 +11,15 @@ DOHServers:
  8.8.8.8 443 https://dns.google/dns-query #Traffic via DOH by default
  DOT 149.112.112.112 853 dns.quad9.net  #Traffic via DOT(DNS over TLS)
 HostsMatch:
+ #OCSP and CRL domains needed for SChannel on Windows
+  #quad9
   cacerts.digicert.com$ 23.11.41.157
   ocsp.digicert.com$ 23.11.41.157
+  #google
+  i.pki.goog$ 142.251.142.227
+  c.pki.goog$ 142.251.38.99
+ #another domains
+
   ?*.lon.llnw.net$		0.0.0.0
   ?*.telemetry.microsoft.com$
   ?*.telemetry.microsoft.com.nsatc.net$

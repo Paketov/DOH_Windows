@@ -34,6 +34,12 @@
 #include <openssl/ssl.h>
 #include <openssl/err.h>
 #include <openssl/x509v3.h>
+#include <openssl/ocsp.h>
+
+#include <openssl/lhash.h>
+#include <openssl/objects.h>
+#include <openssl/safestack.h>
+
 #ifdef WIN32
 #include <openssl/rand.h>
 #endif
@@ -630,11 +636,17 @@ asn1_time_to_str (char *buf, int buf_len, ASN1_TIME *tm)
 {
 	BIO *mem = BIO_new (BIO_s_mem ());
 	char *expires = NULL;
+	int len = 0;
 	ASN1_TIME_print (mem, tm);
-	BIO_get_mem_data (mem, &expires);
+	len = BIO_get_mem_data (mem, &expires);
 	buf[0] = 0;
-	if (expires)
-		safe_strcpy (buf, expires, MIN (24, buf_len));
+	if (expires) {
+		if (len > 64) len = 63;
+		if (len > buf_len) len = buf_len;
+		memcpy(buf, expires, len);
+		buf[len] = '\0';
+		//safe_strcpy(buf, expires, MIN(64, buf_len));
+	}
 	BIO_free (mem);
 }
 
@@ -654,6 +666,104 @@ broke_oneline (char *oneline, char *parray[])
 	parray[i] = NULL;
 }
 
+
+static int X509_get1_crl_urls(char* dest_buf, int size_buf, int* offset_in_dest_buf, const X509 *x) {
+	STACK_OF(DIST_POINT) *crldp = NULL;
+	int i, gtype, j;
+	char *urlptr = NULL;
+	GENERAL_NAMES *gens;
+	ASN1_STRING *uri;
+	GENERAL_NAME *gen;
+	DIST_POINT *dp;
+	int ret = 0;
+	int buf_ofset = 0;
+
+	if (!(crldp = X509_get_ext_d2i(x, NID_crl_distribution_points, NULL, NULL)))
+		goto lbl_out;
+	for (i = 0; i < sk_DIST_POINT_num(crldp); i++) {
+		dp = sk_DIST_POINT_value(crldp, i);
+
+		gens = dp->distpoint->name.fullname;
+
+		for (j = 0; j < sk_GENERAL_NAME_num(gens); j++) {
+			gen = sk_GENERAL_NAME_value(gens, j);
+			uri = GENERAL_NAME_get0_value(gen, &gtype);
+
+			if (gtype == GEN_URI) {
+				if ((buf_ofset + uri->length + 1) >= size_buf)
+					continue;
+
+				memcpy(dest_buf, uri->data, uri->length + 1);
+				buf_ofset += (uri->length + 1);
+				ret++;
+			}
+		}
+	}
+	sk_DIST_POINT_pop_free(crldp, DIST_POINT_free);
+
+	if (!(crldp = X509_get_ext_d2i(x, NID_freshest_crl, NULL, NULL)))
+		goto lbl_out;
+	for (i = 0; i < sk_DIST_POINT_num(crldp); i++) {
+		dp = sk_DIST_POINT_value(crldp, i);
+
+		gens = dp->distpoint->name.fullname;
+
+		for (j = 0; j < sk_GENERAL_NAME_num(gens); j++) {
+			gen = sk_GENERAL_NAME_value(gens, j);
+			uri = GENERAL_NAME_get0_value(gen, &gtype);
+
+			if (gtype == GEN_URI) {
+				if ((buf_ofset + uri->length + 1) >= size_buf)
+					continue;
+
+				memcpy(dest_buf, uri->data, uri->length + 1);
+				buf_ofset += (uri->length + 1);
+				ret++;
+			}
+		}
+	}
+lbl_out:
+	if(crldp)
+		sk_DIST_POINT_pop_free(crldp, DIST_POINT_free);
+	if (offset_in_dest_buf)
+		*offset_in_dest_buf = buf_ofset;
+	
+	return ret;
+}
+
+static int X509_get1_ocsp_urls(char* dest_buf, int size_buf, int* offset_in_dest_buf, const X509 *x)
+{
+	AUTHORITY_INFO_ACCESS *info;
+	ACCESS_DESCRIPTION *accessdsk;
+	char * str;
+	int i, len;
+	int buf_ofset = 0;
+	int ret = 0;
+
+	if (!(info = X509_get_ext_d2i(x, NID_info_access, NULL, NULL)))
+		return NULL;
+	for (i = 0; i < sk_ACCESS_DESCRIPTION_num(info); i++) {
+		accessdsk = sk_ACCESS_DESCRIPTION_value(info, i);
+		if (accessdsk->location->type == GEN_URI) {
+			len = accessdsk->location->d.uniformResourceIdentifier->length;
+			str = accessdsk->location->d.uniformResourceIdentifier->data;
+
+			if ((buf_ofset + len + 1) >= size_buf)
+				continue;
+
+			memcpy(dest_buf, str, len + 1);
+			buf_ofset += (len + 1);
+			ret++;
+		}
+	}
+	AUTHORITY_INFO_ACCESS_free(info);
+
+	if (offset_in_dest_buf)
+		*offset_in_dest_buf = buf_ofset;
+
+	return ret;
+}
+
 int
 pchat_ssl_get_cert_info (struct cert_info *out, pchat_ssl *s)
 {
@@ -661,8 +771,12 @@ pchat_ssl_get_cert_info (struct cert_info *out, pchat_ssl *s)
 	X509_PUBKEY *key;
 	X509_ALGOR *algor = NULL;
 	EVP_PKEY *pkey;
+	STACK_OF(OPENSSL_STRING) *ocsp_strs;
 	int alg, sign_alg;
 	char nb[64], na[64];
+	char* c;
+
+	memset(out, 0, sizeof(*out));
 
 	if (!s || !s->ssl)
 		return 1;
@@ -703,6 +817,47 @@ pchat_ssl_get_cert_info (struct cert_info *out, pchat_ssl *s)
 	safe_strcpy (out->notafter, na, sizeof (out->notafter));
 	out->rsa_tmp_bits = 0;
 
+	STACK_OF(X509) *cert_chain_stack = SSL_get_peer_cert_chain(s->ssl);
+	if (cert_chain_stack) {
+		int cert_chain_stack_size = sk_X509_num(cert_chain_stack);
+		int j;
+		int urls_offset = 0;
+		int urls_offset2 = 0;
+		int count_urls = 0;
+		int count_urls2 = 0;
+
+		for (int i = 0; i < cert_chain_stack_size; i++) {
+			X509* certificate = sk_X509_value(cert_chain_stack, i);
+			count_urls2 = X509_get1_ocsp_urls(out->__buf_for_ocsp_urls + urls_offset, sizeof(out->__buf_for_ocsp_urls) - urls_offset, &urls_offset2, certificate);
+			count_urls += count_urls2;
+			urls_offset += urls_offset2;
+		}
+		urls_offset2 = 0;
+		for (j = 0; (j < count_urls) && (j < (sizeof(out->ocsp_urls) / sizeof(out->ocsp_urls[0]))); j++) {
+			out->ocsp_urls[j] = (out->__buf_for_ocsp_urls + urls_offset2);
+			urls_offset2 += strlen(out->ocsp_urls[j]) + 1;
+		}
+		out->ocsp_urls_count = j;
+
+		urls_offset = 0;
+		urls_offset2 = 0;
+		count_urls = 0;
+		count_urls2 = 0;
+		for (int i = 0; i < cert_chain_stack_size; i++) {
+			X509* certificate = sk_X509_value(cert_chain_stack, i);
+			count_urls2 = X509_get1_crl_urls(out->__buf_for_crl_urls + urls_offset, sizeof(out->__buf_for_crl_urls) - urls_offset, &urls_offset2, certificate);
+			count_urls += count_urls2;
+			urls_offset += urls_offset2;
+		}
+		urls_offset2 = 0;
+		for (j = 0; (j < count_urls) && (j < (sizeof(out->crl_urls) / sizeof(out->crl_urls[0]))); j++) {
+			out->crl_urls[j] = (out->__buf_for_crl_urls + urls_offset2);
+			urls_offset2 += strlen(out->crl_urls[j]) + 1;
+		}
+		out->crl_urls_count = j;
+
+		sk_X509_pop_free(cert_chain_stack, X509_free);
+	}
 	EVP_PKEY_free (pkey);
 	X509_free (cert);
 	return 0;

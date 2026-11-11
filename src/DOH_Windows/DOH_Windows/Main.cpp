@@ -156,7 +156,7 @@ typedef struct DnsPktQuery {
 } DnsPktQuery;
 
 typedef struct DnsPktResp {
-	uint16_t Name;
+	uint16_t Id; //Name
 	uint16_t Type;
 	uint16_t Class;
 	uint32_t TTL;
@@ -599,8 +599,32 @@ static int GetDomainsNamesFromDNSPkt(const void* Dns, size_t DnsLen, char* DstBu
 	return i;
 }
 
+static int DomainToDNSFormat(uint8_t *dns, const char *host){
+	unsigned int i, t = 0;
+	int host_len = strlen(host);
+	uint8_t* dns2 = dns;
+	for (i = 0; i < host_len; i++){
+		if (host[i] == '.'){
+			*dns++ = i - t;
+			for (; t<i; t++)
+				*dns++ = host[t];
+			t++;
+		}
+	}
+	if (host[host_len - 1] != '.') {
+		*dns++ = i - t;
+		for (; t<i; t++)
+			*dns++ = host[t];
+	}
+	*dns = '\0';
+	return dns - dns2;
+}
+
 static const uint32_t HTTPEndHeaders = *((uint32_t*)"\r\n\r\n");
 static const uint16_t HTTPEndHeader = *((uint16_t*)"\r\n");
+
+
+
 
 static unsigned __stdcall WorkerProc(void* data) {
 	Worker* Wrk = (Worker*)data;
@@ -615,6 +639,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 	pchat_ssl_ctx* ctx = NULL;
 	pchat_ssl* ssl = NULL;
 	pchat_ssl_verify_result ver_res;
+	pchat_ssl_handshake_status stat;
 
 	Fds[0].fd = Wrk->Event;
 	Fds[0].events = LQ_POLLIN;
@@ -678,7 +703,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 	const int HostStringLen = strlen(HostString);
 	const int PathStringLen = strlen(PathString);
 	
-	pchat_ssl_handshake_status stat;
+	
 
 	ssl_ctx_locker.LockWriteYield();
 
@@ -717,6 +742,8 @@ static unsigned __stdcall WorkerProc(void* data) {
 					OutputDebugString(TEXT("DOH_Windows: ConnConnectTCP returned -1. Maybe net unreacheble"));
 					goto lblPollHup;
 				}
+
+
 				ssl = pchat_ssl_new(ctx, Socket, HostString);
 				if (ssl == NULL) {
 					goto lblPollHup;
@@ -729,9 +756,12 @@ static unsigned __stdcall WorkerProc(void* data) {
 					OutputDebugString(TEXT("DOH_Windows: pchat_ssl_do_handshake() != PCHAT_SSL_HANDSHAKE_DONE. Conn error, not have SSL handshake"));
 					goto lblPollHup;
 				}
-				
+
 				pchat_ssl_get_verify_result(ssl, HostString, &ver_res);
 				if (!ver_res.verified) {
+					//On Windows SChannel can be error because OCSP and CRL domain not getted
+					//You need add in doh.txt OCSP and CRL domains IP addresses
+
 					char Buf[500];
 					snprintf(
 						Buf, 
@@ -760,6 +790,8 @@ static unsigned __stdcall WorkerProc(void* data) {
 				CountFds = 2;
 				DbgConsolePrintf("Conn created %s\n", Wrk->ServerInfo->Ip);
 			}
+
+
 			Wrk->TskLoker.LockReadYield();
 			CurTsk = Wrk->CurTsk;
 			Wrk->TskLoker.UnlockRead();
@@ -872,7 +904,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 							goto lblPollHup;
 						DbgConsolePrintf("Call sendto() send DNS pkt from %s\n", Wrk->ServerInfo->Ip);
 						sendto(UDPSocket, ReciveBuffer + sizeof(uint16_t), SizeDNSPkt, 0, (sockaddr*)&FirstReq->From, FirstReq->FromLen);
-						
+
 						IsPktReceived = true;
 
 						Wrk->TskLoker.LockWriteYield();
@@ -1204,6 +1236,9 @@ static unsigned __stdcall MainDOH(void* data) {
 			goto lblContinue5;
 		}
 		Req->BufLen = res;
+		DnsPkt* DnsVal = (DnsPkt*)Req->Buf;
+		char* Querys = (char*)(DnsVal + 1);
+		DnsPktQuery* PktQ = (DnsPktQuery*)(Querys + strlen(Querys) + 1);
 
 		if (CountRspHosts > 0) { //If have hosts list, then enum all elements in host list and match patterns
 			int CountQuer = GetDomainsNamesFromDNSPkt(Req->Buf, Req->BufLen, HostsListInputReq, sizeof(HostsListInputReq));
@@ -1232,7 +1267,7 @@ static unsigned __stdcall MainDOH(void* data) {
 							DnsVal->Flags |= htons(0x8000u);
 							Response->Class = htons(0x0001u);
 							Response->TTL = htonl(200);
-							Response->Name = htons(0xC00Cu);
+							Response->Id = htons(0xC00Cu);/*DnsVal->Id;*/
 
 							if (RspHosts[k].RspIP.Addr.sa_family == AF_INET) {
 								Response->Type = htons(1u);
