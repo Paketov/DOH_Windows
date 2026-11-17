@@ -736,6 +736,8 @@ static unsigned __stdcall WorkerProc(void* data) {
 		CurWaitTime = WaitTime;
 		if (WaitTime == DOH_WAIT_RESPONCE_MILLISEC)
 			CurWaitTime = (DOH_WAIT_RESPONCE_MILLISEC / 6);
+		else
+			CountPollCheck = 0;
 
 		int PollRes = LqPollCheck(Fds, CountFds, CurWaitTime);
 		if (PollRes == 0) {
