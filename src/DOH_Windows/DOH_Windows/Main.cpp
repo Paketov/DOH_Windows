@@ -870,14 +870,14 @@ static unsigned __stdcall WorkerProc(void* data) {
 			if (SendBufferPos <= 0) {
 				Fds[1].events &= ~LQ_POLLOUT;
 				//WaitTime = DisconnectWaitTime;
-			} /*else {
+			}/* else {
 				WaitTime = 500;
 			}*/
 		}
 
 
 
-		if ((CountFds > 1) && (Fds[1].revents & LQ_POLLIN)) { //If have data in socket
+		if (CountFds > 1) { //If have data in socket
 			int Readed = pchat_ssl_recv(ssl, ReciveBuffer + ReciveBufferPos, ReciveBufferSize - ReciveBufferPos);
 			if (Readed < 0) {
 				if (LqConnIsWouldBlock()) {
@@ -919,8 +919,10 @@ static unsigned __stdcall WorkerProc(void* data) {
 							Wrk->EndTsk->NextTsk = NULL;
 						}
 						Wrk->TskLen--;
-						if (Wrk->TskLen <= 0)
+						if (Wrk->TskLen <= 0) {
 							WaitTime = DisconnectWaitTime;
+							PollRes = 1;
+						}
 						Wrk->TskLoker.UnlockWrite();
 
 						LqFastAlloc::Delete(FirstReq);
@@ -1016,8 +1018,10 @@ static unsigned __stdcall WorkerProc(void* data) {
 						Wrk->EndTsk->NextTsk = NULL;
 					}
 					Wrk->TskLen--;
-					if (Wrk->TskLen <= 0)
+					if (Wrk->TskLen <= 0) {
 						WaitTime = DisconnectWaitTime;
+						PollRes = 1;
+					}
 					Wrk->TskLoker.UnlockWrite();
 
 					LqFastAlloc::Delete(FirstReq);
@@ -1031,7 +1035,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 			}
 		}
 
-		if ((Fds[1].revents & LQ_POLLHUP) || (PollRes == 0) || Wrk->IsEndWork.load()) {
+		if (((CountFds > 1) && (Fds[1].revents & LQ_POLLHUP)) || (PollRes == 0) || Wrk->IsEndWork.load()) {
 		lblPollHup:;
 			DbgConsolePrintf("Conn closed %s\n", Wrk->ServerInfo->Ip);
 			if (ssl != NULL) {
