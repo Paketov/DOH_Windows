@@ -725,12 +725,28 @@ static unsigned __stdcall WorkerProc(void* data) {
 
 	ssl_ctx_locker.UnlockWrite();
 
+	int CountPollCheck = 0;
+	int CurWaitTime;
 
 	OutputDebugString(TEXT("DOH_Windows: enter worker proc main loop"));
 	for (;;) {
 		DbgCheckHeap();
 		Fds[1].revents = 0;
-		int PollRes = LqPollCheck(Fds, CountFds, WaitTime);
+
+		CurWaitTime = WaitTime;
+		if (WaitTime == DOH_WAIT_RESPONCE_MILLISEC)
+			CurWaitTime = (DOH_WAIT_RESPONCE_MILLISEC / 6);
+
+		int PollRes = LqPollCheck(Fds, CountFds, CurWaitTime);
+		if (PollRes == 0) {
+			if (WaitTime == DOH_WAIT_RESPONCE_MILLISEC) {
+				CountPollCheck++;
+				if (CountPollCheck < 6)
+					PollRes = 1;
+			}
+		}else{
+			CountPollCheck = 0;
+		}
 		if (Fds[0].revents & LQ_POLLIN) { //If have input task event
 			DbgConsolePrintf("Event received %s\n", Wrk->ServerInfo->Ip);
 
@@ -759,7 +775,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 
 				pchat_ssl_get_verify_result(ssl, HostString, &ver_res);
 				if (!ver_res.verified) {
-					//On Windows SChannel can be error because OCSP and CRL domain not getted
+					//On Windows SChannel can generate error because OCSP and CRL domain not getted
 					//You need add in doh.txt OCSP and CRL domains IP addresses
 
 					char Buf[500];
@@ -810,8 +826,7 @@ static unsigned __stdcall WorkerProc(void* data) {
 					SendBufferPos += sizeof(uint16_t);
 					memcpy(SendBuffer + SendBufferPos, CurTsk->Buf, CurTsk->BufLen);
 					SendBufferPos += CurTsk->BufLen;
-				}
-				else {
+				} else {
 					/* DNS Over HTTPS */
 
 					//int Base64Len = LqDataToBase64(true, false, CurTsk->Buf, CurTsk->BufLen, Base64Buf, Base64BufSize - 3);
@@ -850,7 +865,8 @@ static unsigned __stdcall WorkerProc(void* data) {
 				Wrk->TskLoker.UnlockWrite();
 			}
 		}
-		if ((CountFds > 1) && ((Fds[1].revents & LQ_POLLOUT) || (SendBufferPos > 0))) { //Is need send data via socket
+
+		if (CountFds > 1) { //Is need send data via socket
 			if (SendBufferPos > 0) {
 				int Written = pchat_ssl_send(ssl, SendBuffer, SendBufferPos);
 				if (Written < 0) {
@@ -874,8 +890,6 @@ static unsigned __stdcall WorkerProc(void* data) {
 				WaitTime = 500;
 			}*/
 		}
-
-
 
 		if (CountFds > 1) { //If have data in socket
 			int Readed = pchat_ssl_recv(ssl, ReciveBuffer + ReciveBufferPos, ReciveBufferSize - ReciveBufferPos);
