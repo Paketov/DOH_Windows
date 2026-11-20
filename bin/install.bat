@@ -25,7 +25,7 @@ rundll32 "%systemroot%\system32\DOH_Windows.dll" InstallService
 
 rem rundll32 "%systemroot%\system32\DOH_Windows.dll" SetFailureActions
 
-sc failure DOH_Windows reset= 30 actions= restart/1000
+sc failure DOH_Windows reset= 30 actions= restart/5000
 
 rem  Enum adapters and set DNS ip 127.0.0.1 to this adapters
 

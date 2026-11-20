@@ -203,6 +203,7 @@ int LqPollCheck(LqPoll* Fds, size_t CountFds, LqTimeMillisec TimeoutMillisec) {
 			if (Fds[i].revents != 0)
 				CountEvents++;
 			if (CountEvents > 0) {
+				WSAEventSelect((SOCKET)Fds[i].fd, Handles[i], 0);
 				CloseHandle(Handles[i]);
 				Handles[i] = (HANDLE)Fds[i].fd;
 			}
@@ -462,8 +463,11 @@ lblOut:
 	for (size_t i = 0; i < CountFds; i++) {
 		if (Types[i] == LQ_POLL_TYPE_DRIVER)
 			CancelIo((HANDLE)Fds[i].fd);
-		if (((HANDLE)Fds[i].fd) != Handles[i])
+		if (((HANDLE)Fds[i].fd) != Handles[i]) {
+			if(Types[i] == LQ_POLL_TYPE_SOCKET)
+				WSAEventSelect((SOCKET)Fds[i].fd, Handles[i], 0);
 			CloseHandle(Handles[i]);
+		}
 	}
 	if(Handles != (HANDLE*)Buf)
 		LqMemFree(Handles);
