@@ -725,30 +725,30 @@ static unsigned __stdcall WorkerProc(void* data) {
 
 	ssl_ctx_locker.UnlockWrite();
 
-	int CountPollCheck = 0;
-	int CurWaitTime;
+	//int CountPollCheck = 0;
+	//int CurWaitTime;
 
 	OutputDebugString(TEXT("DOH_Windows: enter worker proc main loop"));
 	for (;;) {
 		DbgCheckHeap();
 		Fds[1].revents = 0;
 
-		CurWaitTime = WaitTime;
-		if (WaitTime == DOH_WAIT_RESPONCE_MILLISEC)
-			CurWaitTime = (DOH_WAIT_RESPONCE_MILLISEC / 6);
-		else
-			CountPollCheck = 0;
+		//CurWaitTime = WaitTime;
+		//if (WaitTime == DOH_WAIT_RESPONCE_MILLISEC)
+		//	CurWaitTime = (DOH_WAIT_RESPONCE_MILLISEC / 6);
+		//else
+		//	CountPollCheck = 0;
 
-		int PollRes = LqPollCheck(Fds, CountFds, CurWaitTime);
-		if (PollRes == 0) {
-			if (WaitTime == DOH_WAIT_RESPONCE_MILLISEC) {
-				CountPollCheck++;
-				if (CountPollCheck < 6)
-					PollRes = 1;
-			}
-		}else{
-			CountPollCheck = 0;
-		}
+		int PollRes = LqPollCheck(Fds, CountFds, WaitTime);
+		//if (PollRes == 0) {
+		//	if (WaitTime == DOH_WAIT_RESPONCE_MILLISEC) {
+		//		CountPollCheck++;
+		//		if (CountPollCheck < 6)
+		//			PollRes = 1;
+		//	}
+		//}else{
+		//	CountPollCheck = 0;
+		//}
 		if (Fds[0].revents & LQ_POLLIN) { //If have input task event
 			DbgConsolePrintf("Event received %s\n", Wrk->ServerInfo->Ip);
 
