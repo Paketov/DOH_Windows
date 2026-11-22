@@ -198,8 +198,10 @@ int LqPollCheck(LqPoll* Fds, size_t CountFds, LqTimeMillisec TimeoutMillisec) {
 			Types[i] = LQ_POLL_TYPE_SOCKET;
 			Handles[i] = CreateEventW(NULL, TRUE, FALSE, NULL);
 			WSAEventSelect((SOCKET)Fds[i].fd, Handles[i], LqEvntSystemEventByConnFlag(Fds[i].events));
-			WSAEnumNetworkEvents((SOCKET)Fds[i].fd, Handles[i], &NetEvnts);
-			Fds[i].revents = LqConnFlagBySysEvent(NetEvnts.lNetworkEvents);
+			if (WaitForSingleObject(Handles[i], 0) == WAIT_OBJECT_0) {
+				WSAEnumNetworkEvents((SOCKET)Fds[i].fd, Handles[i], &NetEvnts);
+				Fds[i].revents = LqConnFlagBySysEvent(NetEvnts.lNetworkEvents);
+			}
 			if (Fds[i].revents != 0)
 				CountEvents++;
 			if (CountEvents > 0) {
